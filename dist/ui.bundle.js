@@ -1,0 +1,539 @@
+"use strict";
+(() => {
+  var __defProp = Object.defineProperty;
+  var __defProps = Object.defineProperties;
+  var __getOwnPropDescs = Object.getOwnPropertyDescriptors;
+  var __getOwnPropSymbols = Object.getOwnPropertySymbols;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __propIsEnum = Object.prototype.propertyIsEnumerable;
+  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+  var __spreadValues = (a, b) => {
+    for (var prop in b || (b = {}))
+      if (__hasOwnProp.call(b, prop))
+        __defNormalProp(a, prop, b[prop]);
+    if (__getOwnPropSymbols)
+      for (var prop of __getOwnPropSymbols(b)) {
+        if (__propIsEnum.call(b, prop))
+          __defNormalProp(a, prop, b[prop]);
+      }
+    return a;
+  };
+  var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
+
+  // src/review.ts
+  var CATEGORIES = ["color", "spacing", "shape"];
+  var COMPONENT_SEGMENT = /^_?[a-z0-9]+(?:[-_][a-z0-9]+)*$/;
+  var SEGMENT = /^[a-z0-9][a-zA-Z0-9]*(?:-[a-z0-9][a-zA-Z0-9]*)*$/;
+  function validateTokenName(name) {
+    if (!name.trim()) return "Name is empty";
+    if (name !== name.trim() || /\s/.test(name)) return "No spaces allowed";
+    const parts = name.split("/");
+    if (parts.some((p) => p === "")) return "Empty segment (check the slashes)";
+    if (!COMPONENT_SEGMENT.test(parts[0])) return "Component segment must be lowercase-kebab";
+    const bad = parts.slice(1).find((p) => !SEGMENT.test(p));
+    if (bad) return `Segment "${bad}" must start lowercase (camelCase or kebab)`;
+    const catIndex = parts.findIndex((p, i) => i > 0 && CATEGORIES.includes(p));
+    if (catIndex === -1) return "Needs a category: color, spacing or shape";
+    if (catIndex > 2) return "Category must follow the component or its part";
+    if (parts.filter((p) => CATEGORIES.includes(p)).length > 1) return "Only one category segment allowed";
+    if (catIndex === parts.length - 1) return "Needs a property after the category";
+    return null;
+  }
+  function semanticType(t) {
+    return t === "COLOR" ? "COLOR" : "FLOAT";
+  }
+  function aliasOptions(token, semantic) {
+    var _a;
+    const byId = new Map(semantic.map((s) => [s.id, s]));
+    const suggested = [];
+    for (const id of [token.alias.desktop, token.alias.mobile, ...token.candidates]) {
+      if (id && !suggested.includes(id)) suggested.push(id);
+    }
+    const groups = [];
+    if (suggested.length) {
+      groups.push({
+        label: "Suggested",
+        options: suggested.map((id) => {
+          var _a2, _b;
+          return { id, label: (_b = (_a2 = byId.get(id)) == null ? void 0 : _a2.name) != null ? _b : id };
+        })
+      });
+    }
+    const want = semanticType(token.type);
+    const byCollection = /* @__PURE__ */ new Map();
+    for (const s of semantic) {
+      if (s.type !== want || suggested.includes(s.id)) continue;
+      const list = (_a = byCollection.get(s.collection)) != null ? _a : [];
+      list.push({ id: s.id, label: s.name });
+      byCollection.set(s.collection, list);
+    }
+    for (const [label, options] of byCollection) groups.push({ label, options });
+    return groups;
+  }
+  function buildReviewModel(p, semantic) {
+    var _a;
+    const raw = [];
+    const tokens = [];
+    for (const t of p.tokens) {
+      if (t.match === "none") {
+        raw.push({ display: `${t.name} (${t.replaces})`, useCount: t.uses.length, reason: (_a = t.note) != null ? _a : "No semantic token matches this value" });
+        continue;
+      }
+      tokens.push({
+        key: t.key,
+        name: t.name,
+        apply: !t.skip,
+        status: t.status,
+        match: t.match,
+        splitModes: t.alias.desktop !== t.alias.mobile,
+        aliasDesktop: t.alias.desktop,
+        aliasMobile: t.alias.mobile,
+        options: aliasOptions(t, semantic),
+        replaces: t.replaces,
+        useCount: t.uses.length,
+        note: t.note
+      });
+    }
+    for (const u of p.unmatched) raw.push({ display: u.display, useCount: u.uses.length, reason: u.reason });
+    return {
+      componentName: p.componentName,
+      newComponentName: p.newComponentName,
+      warnings: p.warnings.slice(),
+      renames: p.renames.map((r, index) => ({
+        index,
+        depth: r.indexPath.length,
+        oldName: r.oldName,
+        newName: r.newName,
+        reason: r.reason,
+        apply: !r.skip
+      })),
+      tokens,
+      raw
+    };
+  }
+  function collectProposal(original2, edits2) {
+    const renameEdits = new Map(edits2.renames.map((e) => [e.index, e]));
+    const tokenEdits = new Map(edits2.tokens.map((e) => [e.key, e]));
+    return __spreadProps(__spreadValues({}, original2), {
+      newComponentName: edits2.newComponentName === void 0 || original2.newComponentName === null ? original2.newComponentName : edits2.newComponentName,
+      renames: original2.renames.map((r, i) => {
+        const e = renameEdits.get(i);
+        return __spreadValues(__spreadProps(__spreadValues({}, r), { indexPath: r.indexPath.slice() }), e ? { newName: e.newName, skip: !e.apply } : {});
+      }),
+      tokens: original2.tokens.map((t) => {
+        const e = tokenEdits.get(t.key);
+        const copy = __spreadProps(__spreadValues({}, t), { alias: __spreadValues({}, t.alias), candidates: t.candidates.slice(), uses: t.uses.slice() });
+        if (e) {
+          copy.name = e.name;
+          copy.skip = !e.apply;
+          copy.alias = { desktop: e.aliasDesktop, mobile: e.aliasMobile };
+        }
+        if (copy.match === "none") copy.skip = true;
+        return copy;
+      }),
+      unmatched: original2.unmatched.map((u) => __spreadProps(__spreadValues({}, u), { uses: u.uses.slice() })),
+      warnings: original2.warnings.slice()
+    });
+  }
+  function tokenErrors(p) {
+    var _a, _b, _c;
+    const errors = /* @__PURE__ */ new Map();
+    const active = p.tokens.filter((t) => !t.skip && t.match !== "none");
+    const byName = /* @__PURE__ */ new Map();
+    for (const t of active) {
+      const err = validateTokenName(t.name);
+      if (err) errors.set(t.key, err);
+      if (!t.alias.desktop || !t.alias.mobile) errors.set(t.key, (_a = errors.get(t.key)) != null ? _a : "Pick an alias for every mode");
+      const list = (_b = byName.get(t.name)) != null ? _b : [];
+      list.push(t);
+      byName.set(t.name, list);
+    }
+    for (const [name, list] of byName) {
+      const first = list[0];
+      const conflict = list.some((t) => t.alias.desktop !== first.alias.desktop || t.alias.mobile !== first.alias.mobile);
+      if (!conflict) continue;
+      for (const t of list) errors.set(t.key, (_c = errors.get(t.key)) != null ? _c : `"${name}" is used with different aliases`);
+    }
+    return errors;
+  }
+  function renameErrors(p) {
+    const errors = /* @__PURE__ */ new Map();
+    p.renames.forEach((r, i) => {
+      if (!r.skip && !r.newName.trim()) errors.set(i, "New name is empty");
+    });
+    return errors;
+  }
+  function findProblems(p) {
+    var _a, _b;
+    const problems = [];
+    for (const [i, err] of renameErrors(p)) problems.push(`Rename "${p.renames[i].oldName}": ${err}`);
+    const byKey = new Map(p.tokens.map((t) => [t.key, t]));
+    for (const [key, err] of tokenErrors(p)) problems.push(`Token "${(_b = (_a = byKey.get(key)) == null ? void 0 : _a.name) != null ? _b : key}": ${err}`);
+    if (p.newComponentName !== null && !p.newComponentName.trim()) problems.push("New component name is empty");
+    return problems;
+  }
+  function countChecked(p) {
+    return {
+      renames: p.renames.filter((r) => !r.skip).length,
+      tokens: p.tokens.filter((t) => !t.skip && t.match !== "none").length
+    };
+  }
+  function stepTitle(phase2) {
+    return phase2 === "rename" ? "Step 1: rename layers" : "Step 2: create tokens";
+  }
+  function summarizeResult(r, phase2) {
+    const counts = phase2 === "rename" ? `${r.renamed} renamed` : `${r.tokensCreated} tokens created, ${r.tokensReused} reused, ${r.bound} bound`;
+    return `${stepTitle(phase2)} applied. ${counts}`;
+  }
+  function auditView(audit) {
+    if (audit === "PASS") return { kind: "pass", text: "Audit: PASS" };
+    if (audit === "skipped") return { kind: "skipped", text: "Audit: not run in the rename step" };
+    return { kind: "issues", text: "Audit issues", lines: audit };
+  }
+
+  // src/ui.ts
+  var scanRenameBtn = document.getElementById("scan-rename");
+  var scanTokensBtn = document.getElementById("scan-tokens");
+  var stepTitleEl = document.getElementById("step-title");
+  var statusEl = document.getElementById("status");
+  var reviewEl = document.getElementById("review");
+  var actionsEl = document.getElementById("review-actions");
+  var countsEl = document.getElementById("counts");
+  var applyBtn = document.getElementById("apply");
+  var cancelBtn = document.getElementById("cancel");
+  var resultEl = document.getElementById("result");
+  var original = null;
+  var phase = "rename";
+  var edits = { renames: [], tokens: [] };
+  var busy = false;
+  var uid = 0;
+  var renameErrorEls = /* @__PURE__ */ new Map();
+  var tokenErrorEls = /* @__PURE__ */ new Map();
+  function send(msg) {
+    parent.postMessage({ pluginMessage: msg }, "*");
+  }
+  function h(tag, props = {}, children = []) {
+    const node = document.createElement(tag);
+    if (props.className) node.className = props.className;
+    if (props.text !== void 0) node.textContent = props.text;
+    for (const c of children) if (c) node.appendChild(c);
+    return node;
+  }
+  function nextId(prefix) {
+    uid += 1;
+    return `${prefix}-${uid}`;
+  }
+  function hiddenLabel(forId, text) {
+    const label = h("label", { className: "sr-only", text });
+    label.htmlFor = forId;
+    return label;
+  }
+  function checkbox(checked, label, onChange) {
+    const input = h("input");
+    input.type = "checkbox";
+    input.id = nextId("cb");
+    input.checked = checked;
+    input.addEventListener("change", () => onChange(input.checked));
+    const wrap = h("span", {}, [hiddenLabel(input.id, label), input]);
+    return { wrap, input };
+  }
+  function textInput(value, label, onInput) {
+    const input = h("input");
+    input.type = "text";
+    input.id = nextId("tx");
+    input.value = value;
+    input.spellcheck = false;
+    input.addEventListener("input", () => onInput(input.value));
+    return { input, label: hiddenLabel(input.id, label) };
+  }
+  function aliasSelect(groups, value, label, onChange) {
+    const select = h("select");
+    select.id = nextId("sel");
+    if (value === null) {
+      const empty = h("option", { text: "Pick a token" });
+      empty.value = "";
+      select.appendChild(empty);
+    }
+    for (const g of groups) {
+      const og = h("optgroup");
+      og.label = g.label;
+      for (const o of g.options) {
+        const opt = h("option", { text: o.label });
+        opt.value = o.id;
+        og.appendChild(opt);
+      }
+      select.appendChild(og);
+    }
+    select.value = value != null ? value : "";
+    select.addEventListener("change", () => onChange(select.value || null));
+    const visible = h("label", { text: label });
+    visible.htmlFor = select.id;
+    return h("div", {}, [visible, select]);
+  }
+  function badge(text) {
+    return h("span", { className: `badge ${text}`, text });
+  }
+  function setStatus(text, isError = false) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle("error", isError);
+  }
+  function setBusy(value) {
+    busy = value;
+    scanRenameBtn.disabled = value;
+    scanTokensBtn.disabled = value;
+    cancelBtn.disabled = value;
+    refresh();
+  }
+  function clearReview() {
+    original = null;
+    edits = { renames: [], tokens: [] };
+    renameErrorEls.clear();
+    tokenErrorEls.clear();
+    reviewEl.replaceChildren();
+    reviewEl.hidden = true;
+    stepTitleEl.hidden = true;
+    actionsEl.hidden = true;
+  }
+  function showFieldError(input, errorEl, err) {
+    errorEl.textContent = err != null ? err : "";
+    input.classList.toggle("invalid", !!err);
+    input.setAttribute("aria-invalid", err ? "true" : "false");
+  }
+  function refresh() {
+    if (!original) return;
+    const current = collectProposal(original, edits);
+    const rErr = renameErrors(current);
+    const tErr = tokenErrors(current);
+    for (const [i, els] of renameErrorEls) showFieldError(els.input, els.error, rErr.get(i));
+    for (const [key, els] of tokenErrorEls) showFieldError(els.input, els.error, tErr.get(key));
+    const counts = countChecked(current);
+    const problems = findProblems(current);
+    const nameChanged = current.newComponentName !== null && current.newComponentName !== current.componentName;
+    countsEl.textContent = (phase === "rename" ? `${counts.renames} renames` : `${counts.tokens} tokens`) + (problems.length ? ` \xB7 ${problems.length} problem${problems.length === 1 ? "" : "s"} to fix` : "");
+    applyBtn.disabled = busy || problems.length > 0 || counts.renames === 0 && counts.tokens === 0 && !nameChanged;
+  }
+  function renderHeader(model) {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(h("h3", { text: `Component: ${model.componentName}` }));
+    if (phase === "rename" && model.newComponentName !== null) {
+      const { input } = textInput(model.newComponentName, "New component name", (v) => {
+        edits.newComponentName = v;
+        refresh();
+      });
+      const visible = h("label", { text: "New component name" });
+      visible.htmlFor = input.id;
+      frag.appendChild(h("div", { className: "name-field" }, [visible, input]));
+    }
+    if (phase === "tokens" && model.warnings.length) {
+      frag.appendChild(h("ul", { className: "warnings" }, model.warnings.map((w) => h("li", { text: w }))));
+    }
+    return frag;
+  }
+  function renderRenames(model) {
+    if (!model.renames.length) return null;
+    const rows = model.renames.map((r) => {
+      const tr = h("tr", { className: r.apply ? "" : "off" });
+      const edit = edits.renames.find((e) => e.index === r.index);
+      const cb = checkbox(r.apply, `Apply rename of ${r.oldName}`, (v) => {
+        edit.apply = v;
+        tr.className = v ? "" : "off";
+        refresh();
+      });
+      const { input, label } = textInput(r.newName, `New name for ${r.oldName}`, (v) => {
+        edit.newName = v;
+        refresh();
+      });
+      const error = h("div", { className: "field-error" });
+      renameErrorEls.set(r.index, { input, error });
+      const indent = h("span", { className: "indent" });
+      indent.style.width = `${r.depth * 10}px`;
+      tr.append(
+        h("td", {}, [cb.wrap]),
+        h("td", {}, [indent, document.createTextNode(r.oldName)]),
+        h("td", { className: "arrow", text: "\u2192" }),
+        h("td", {}, [label, input, error]),
+        h("td", { className: "muted", text: r.reason })
+      );
+      return tr;
+    });
+    const head = h("tr", {}, ["Apply", "Layer", "", "New name", "Reason"].map((t) => h("th", { text: t })));
+    return h("section", {}, [
+      h("h3", { text: "Layer renames" }),
+      h("table", {}, [h("thead", {}, [head]), h("tbody", {}, rows)])
+    ]);
+  }
+  function renderTokens(model) {
+    if (!model.tokens.length) return null;
+    const rows = model.tokens.map((t) => {
+      const tr = h("tr", { className: t.apply ? "" : "off" });
+      const edit = edits.tokens.find((e) => e.key === t.key);
+      const cb = checkbox(t.apply, `Apply token ${t.name}`, (v) => {
+        edit.apply = v;
+        tr.className = v ? "" : "off";
+        refresh();
+      });
+      const { input, label } = textInput(t.name, "Token name", (v) => {
+        edit.name = v;
+        refresh();
+      });
+      const error = h("div", { className: "field-error" });
+      tokenErrorEls.set(t.key, { input, error });
+      const alias = h("td", { className: "alias" });
+      if (t.splitModes) {
+        alias.append(
+          aliasSelect(t.options, t.aliasDesktop, "desktop", (v) => {
+            edit.aliasDesktop = v;
+            refresh();
+          }),
+          aliasSelect(t.options, t.aliasMobile, "mobile", (v) => {
+            edit.aliasMobile = v;
+            refresh();
+          })
+        );
+      } else {
+        alias.append(
+          aliasSelect(t.options, t.aliasDesktop, "both modes", (v) => {
+            edit.aliasDesktop = v;
+            edit.aliasMobile = v;
+            refresh();
+          })
+        );
+      }
+      tr.append(
+        h("td", {}, [cb.wrap]),
+        h("td", {}, [label, input, error, t.note ? h("div", { className: "muted", text: t.note }) : null]),
+        h("td", {}, [badge(t.status), document.createTextNode(" "), badge(t.match)]),
+        alias,
+        h("td", { text: t.replaces }),
+        h("td", { text: String(t.useCount) })
+      );
+      return tr;
+    });
+    const head = h("tr", {}, ["Apply", "Token", "Status", "Alias", "Replaces", "Uses"].map((t) => h("th", { text: t })));
+    return h("section", {}, [
+      h("h3", { text: "Tokens" }),
+      h("table", {}, [h("thead", {}, [head]), h("tbody", {}, rows)])
+    ]);
+  }
+  function renderRaw(model) {
+    if (!model.raw.length) return null;
+    const rows = model.raw.map(
+      (r) => h("tr", {}, [
+        h("td", { text: r.display }),
+        h("td", { text: String(r.useCount) }),
+        h("td", { className: "muted", text: r.reason })
+      ])
+    );
+    const head = h("tr", {}, ["Value", "Uses", "Reason"].map((t) => h("th", { text: t })));
+    return h("section", {}, [
+      h("h3", { text: "No match, left raw" }),
+      h("table", {}, [h("thead", {}, [head]), h("tbody", {}, rows)])
+    ]);
+  }
+  function showProposal(msg) {
+    clearReview();
+    resultEl.hidden = true;
+    phase = msg.phase;
+    const proposal = msg.proposal;
+    original = proposal;
+    const model = buildReviewModel(proposal, msg.semantic);
+    edits = {
+      newComponentName: model.newComponentName,
+      renames: model.renames.map((r) => ({ index: r.index, newName: r.newName, apply: r.apply })),
+      tokens: model.tokens.map((t) => ({
+        key: t.key,
+        name: t.name,
+        apply: t.apply,
+        aliasDesktop: t.aliasDesktop,
+        aliasMobile: t.aliasMobile
+      }))
+    };
+    reviewEl.append(renderHeader(model));
+    const sections = phase === "rename" ? [renderRenames(model)] : [renderTokens(model), renderRaw(model)];
+    for (const section of sections) {
+      if (section) reviewEl.appendChild(section);
+    }
+    if (sections.every((s) => !s) && model.newComponentName === null) {
+      const text = phase === "rename" ? "Nothing to rename, all layer names follow the convention." : "Nothing to tokenize, every value is already bound to a token.";
+      reviewEl.appendChild(h("p", { className: "muted", text }));
+    }
+    stepTitleEl.textContent = stepTitle(phase);
+    stepTitleEl.hidden = false;
+    reviewEl.hidden = false;
+    actionsEl.hidden = false;
+    reviewEl.scrollTop = 0;
+    setStatus("Review the changes. Nothing is written until you click Apply.");
+    refresh();
+  }
+  function lineList(lines, className) {
+    return h("ul", className ? { className } : {}, lines.map((l) => h("li", { text: l })));
+  }
+  function showResult(result, applied) {
+    clearReview();
+    resultEl.replaceChildren();
+    resultEl.appendChild(h("h3", { text: summarizeResult(result, applied) }));
+    if (result.snapshotDiff.length) {
+      resultEl.appendChild(
+        h("div", { className: "loud" }, [
+          h("strong", { text: "Look changed" }),
+          lineList(result.snapshotDiff)
+        ])
+      );
+    } else {
+      resultEl.appendChild(h("p", { className: "pass", text: "Look unchanged" }));
+    }
+    const audit = auditView(result.audit);
+    if (audit.kind === "issues") {
+      resultEl.append(h("h3", { text: audit.text }), lineList(audit.lines));
+    } else {
+      resultEl.appendChild(h("p", { className: audit.kind === "pass" ? "pass" : "muted", text: audit.text }));
+    }
+    if (result.skipped.length) {
+      resultEl.append(h("h3", { text: "Skipped" }), lineList(result.skipped));
+    }
+    resultEl.hidden = false;
+    setStatus("Applied.");
+  }
+  function setPrimaryStep(next) {
+    scanRenameBtn.classList.toggle("secondary", next !== "rename");
+    scanTokensBtn.classList.toggle("secondary", next !== "tokens");
+  }
+  function scan(next) {
+    clearReview();
+    resultEl.hidden = true;
+    setStatus("Scanning component\u2026");
+    setBusy(true);
+    send({ type: "component/scan", phase: next });
+  }
+  scanRenameBtn.addEventListener("click", () => scan("rename"));
+  scanTokensBtn.addEventListener("click", () => scan("tokens"));
+  applyBtn.addEventListener("click", () => {
+    if (!original || applyBtn.disabled) return;
+    const proposal = collectProposal(original, edits);
+    if (findProblems(proposal).length) return;
+    setStatus("Applying\u2026");
+    setBusy(true);
+    send({ type: "component/apply", proposal });
+  });
+  cancelBtn.addEventListener("click", () => {
+    send({ type: "component/cancel" });
+    clearReview();
+    setStatus("Cancelled. Nothing was changed.");
+  });
+  window.addEventListener("message", (event) => {
+    var _a;
+    const msg = (_a = event.data) == null ? void 0 : _a.pluginMessage;
+    if (!msg || typeof msg.type !== "string" || !msg.type.startsWith("component/")) return;
+    if (msg.type === "component/proposal") {
+      setBusy(false);
+      showProposal(msg);
+    } else if (msg.type === "component/applied") {
+      setBusy(false);
+      showResult(msg.result, msg.phase);
+      if (msg.phase === "rename") setPrimaryStep("tokens");
+    } else if (msg.type === "component/error") {
+      setBusy(false);
+      setStatus(`Error: ${msg.message}`, true);
+    }
+  });
+})();
