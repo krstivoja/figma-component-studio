@@ -700,10 +700,37 @@ export function qaSeverityText(report: QaReport): string {
     .join(" · ");
 }
 
+// "From a library" rows are informational and come in bunches: two or more fold into one summary row (report and
+// Markdown alike), placed where the first of them was. Counts stay per finding.
+export type QaListItem = { type: "finding"; finding: QaFinding } | { type: "library"; findings: QaFinding[] };
+
+export function foldLibraryFindings(findings: QaFinding[]): QaListItem[] {
+  const library = findings.filter((f) => f.kind === "library-token");
+  if (library.length < 2) return findings.map((finding) => ({ type: "finding", finding }));
+  const out: QaListItem[] = [];
+  for (const finding of findings) {
+    if (finding.kind !== "library-token") out.push({ type: "finding", finding });
+    else if (finding === library[0]) out.push({ type: "library", findings: library });
+  }
+  return out;
+}
+
+export function librarySummaryText(count: number): string {
+  return `${count} tokens come from a library`;
+}
+
+export function libraryDetailText(findings: QaFinding[]): string {
+  const local = findings.filter((f) => f.suggestion).length;
+  if (!local) return "None has a local equivalent";
+  if (local === findings.length) return local === 1 ? "It has a local equivalent" : `All ${local} have a local equivalent`;
+  return `${local} ${local === 1 ? "has" : "have"} a local equivalent`;
+}
+
 const code = (s: string) => `\`${s.replace(/`/g, "'")}\``;
 
-function markdownLine(f: QaFinding): string {
-  const parts = [`- **${f.severity}** ${f.issue}: ${code(f.layer)}`];
+// `nested`: an entry under the library summary bullet, which already says severity and issue.
+function markdownLine(f: QaFinding, nested = false): string {
+  const parts = [nested ? `  - ${code(f.layer)}` : `- **${f.severity}** ${f.issue}: ${code(f.layer)}`];
   if (f.nodeIds.length > 1) parts[0] += ` (+${f.nodeIds.length - 1} more)`;
   parts.push(`current ${code(f.current)}`);
   if (f.suggestion)
@@ -724,7 +751,12 @@ export function qaReportMarkdown(report: QaReport): string {
     ["tokens", "Tokens"],
   ] as const) {
     const list = report.findings.filter((f) => f.area === area);
-    if (list.length) lines.push("", `## ${title}`, "", ...list.map(markdownLine));
+    if (!list.length) continue;
+    lines.push("", `## ${title}`, "");
+    for (const item of foldLibraryFindings(list)) {
+      if (item.type === "finding") lines.push(markdownLine(item.finding));
+      else lines.push(`- **${item.findings[0].severity}** ${librarySummaryText(item.findings.length)}:`, ...item.findings.map((f) => markdownLine(f, true)));
+    }
   }
   if (report.notes.length) lines.push("", "## Notes", "", ...report.notes.map((n) => `- ${n}`));
   return lines.join("\n") + "\n";

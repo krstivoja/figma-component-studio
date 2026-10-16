@@ -186,6 +186,23 @@ describe("QA on the Core segmented control (library tokens)", () => {
     });
   });
 
+  it('Markdown: the library rows fold into one "come from a library" bullet with a nested list; counts stay per finding', async () => {
+    const core = coreFile();
+    const r = await check(core, core.root);
+    const md = qaReportMarkdown(r);
+    const lines = md.split("\n");
+    const at = lines.indexOf("- **info** 6 tokens come from a library:");
+    expect(at).toBeGreaterThan(-1);
+    const end = lines.findIndex((l, i) => i > at && !l.startsWith("  - "));
+    const nested = lines.slice(at + 1, end);
+    expect(nested).toHaveLength(6);
+    expect(nested).toContain(
+      "  - `Segmented control › Action 1` · current `color/surface/accent/primary/enabled` · suggested `color/surface/brand/enabled` (local equivalent) (rules) · Library collection \"color\", local equivalent: color/surface/brand/enabled.",
+    );
+    expect(md).not.toContain("From a library");
+    expect(md).toContain("6 info");
+  });
+
   it("selecting Action 1 checks Action 1 as the root and still reports the wrong family", async () => {
     const core = coreFile();
     const r = await check(core, core.action1);

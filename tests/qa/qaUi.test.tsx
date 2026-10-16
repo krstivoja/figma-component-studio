@@ -1,8 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { QaFinding, QaReport as Report } from "../../src/types";
+import { foldLibraryFindings, libraryDetailText } from "../../src/qa";
 import { App, ctaLabel, readTab } from "../../src/ui/App";
-import { QaReport } from "../../src/ui/views/QaReport";
+import { LibraryRows, QaReport } from "../../src/ui/views/QaReport";
+import { ShowAllToggle } from "../../src/ui/views/Review";
 
 const store = new Map<string, string>();
 
@@ -126,6 +128,77 @@ describe("tabs and QA UI parity", () => {
     expect(html).toContain("Draft (not a component yet)");
     expect(html).toMatch(/Frame(<!-- -->)?: (<!-- -->)?card/);
     expect(html).toContain("Colors pair with their surfaces");
+  });
+
+  describe('"From a library" rows', () => {
+    const lib = (id: string, current: string, local: string | null) =>
+      finding({
+        id,
+        kind: "library-token",
+        severity: "info",
+        issue: "From a library",
+        layer: `card › ${id}`,
+        current,
+        suggestion: local,
+        suggestionColor: local ? { hex: "#0059FF", opacity: 1 } : null,
+        source: local ? "rules" : null,
+        detail: local ? `Library collection "color", local equivalent: ${local}.` : 'Library collection "color", no local equivalent.',
+      });
+    const three = [lib("l1", "color/brand/a", "color/surface/brand/enabled"), lib("l2", "color/brand/b", null), lib("l3", "color/brand/c", "color/surface/1/enabled")];
+    const render = (findings: QaFinding[]) =>
+      renderToStaticMarkup(<QaReport report={{ ...report, findings }} launched={false} onSelect={() => {}} />);
+
+    it("a single one stays a normal row", () => {
+      const html = render([finding({ id: "b" }), three[0]]);
+      expect(html).toContain("From a library");
+      expect(html).toContain("card › l1");
+      expect(html).not.toMatch(/come from a library|Show all/);
+      expect(foldLibraryFindings([three[0]])).toEqual([{ type: "finding", finding: three[0] }]);
+    });
+
+    it("two or more fold into one collapsed summary row where the first was; the count stays per finding", () => {
+      const html = render([finding({ id: "b" }), three[0], finding({ id: "c", layer: "card › after" }), three[1], three[2]]);
+      expect(html).toContain("Tokens (5)");
+      expect(html).toContain("3 tokens come from a library");
+      expect(html).toContain("2 have a local equivalent");
+      expect(html).toContain("Show all 3");
+      expect(html).toContain('aria-expanded="false"');
+      expect(html).not.toMatch(/From a library|card › l[123]/);
+      expect(html.indexOf("3 tokens come from a library")).toBeLessThan(html.indexOf("card › after"));
+      expect(html.match(/<tr/g)).toHaveLength(1 + 3); // header, two findings, one summary
+    });
+
+    it("the detail line: none, some, all", () => {
+      expect(libraryDetailText([three[1], three[1]])).toBe("None has a local equivalent");
+      expect(libraryDetailText([three[0], three[1], three[1]])).toBe("1 has a local equivalent");
+      expect(libraryDetailText([three[0], three[2]])).toBe("All 2 have a local equivalent");
+    });
+
+    it("expanded: each shows as today, with its select button, under a Show less toggle", () => {
+      const selected: string[][] = [];
+      const html = renderToStaticMarkup(
+        <table>
+          <tbody>
+            <LibraryRows findings={three} defaultOpen showRules={false} onSelect={(ids) => selected.push(ids)} />
+          </tbody>
+        </table>,
+      );
+      expect(html).toContain("Show less");
+      expect(html).toContain('aria-expanded="true"');
+      expect(html.match(/>From a library</g)).toHaveLength(3);
+      for (const id of ["l1", "l2", "l3"]) expect(html).toContain(`aria-label="Select card › ${id} on the canvas"`);
+    });
+
+    it("the toggle flips open and closed and names its count", () => {
+      const toggled: boolean[] = [];
+      const closed = ShowAllToggle({ open: false, count: 3, onToggle: (o) => toggled.push(o) });
+      const opened = ShowAllToggle({ open: true, count: 3, onToggle: (o) => toggled.push(o) });
+      (closed.props as { onPress: () => void }).onPress();
+      (opened.props as { onPress: () => void }).onPress();
+      expect(toggled).toEqual([true, false]);
+      expect(renderToStaticMarkup(closed)).toContain("Show all 3");
+      expect(renderToStaticMarkup(opened)).toContain("Show less");
+    });
   });
 
   it("maps-to-different-values notes collapse into one line with a show-all button", () => {

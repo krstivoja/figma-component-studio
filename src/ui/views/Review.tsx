@@ -50,12 +50,40 @@ export function slashBreaks(text: string): ReactNode {
   ));
 }
 
+// The ghost "Show all N / Show less" button after a folded summary line.
+export function ShowAllToggle({
+  open,
+  count,
+  onToggle,
+  label,
+}: {
+  open: boolean;
+  count: number;
+  onToggle: (open: boolean) => void;
+  /** Accessible name when the visible text alone is unclear out of context. */
+  label?: string;
+}) {
+  const Chevron = open ? ChevronUp : ChevronDown;
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      aria-expanded={open}
+      aria-label={label}
+      onPress={() => onToggle(!open)}
+      className="-my-0.5 h-5! px-1.5! align-middle"
+    >
+      {open ? "Show less" : `Show all ${count}`}
+      <Chevron aria-hidden size={12} className="text-icon-secondary" />
+    </Button>
+  );
+}
+
 // Scan warnings; the "maps to different values" ones collapse into one line with a show-all list.
 export function WarningsBanner({ warnings }: { warnings: string[] }) {
   const [open, setOpen] = useState(false);
   if (!warnings.length) return null;
   const { other, conflicts } = groupWarnings(warnings);
-  const Chevron = open ? ChevronUp : ChevronDown;
   return (
     <Banner tone="warning">
       <ul className="m-0 list-disc pl-4">
@@ -65,16 +93,7 @@ export function WarningsBanner({ warnings }: { warnings: string[] }) {
         {conflicts.length ? (
           <li>
             {conflictSummaryText(conflicts.length)}{" "}
-            <Button
-              variant="ghost"
-              size="sm"
-              aria-expanded={open}
-              onPress={() => setOpen(!open)}
-              className="-my-0.5 h-5! px-1.5! align-middle"
-            >
-              {open ? "Show less" : `Show all ${conflicts.length}`}
-              <Chevron aria-hidden size={12} className="text-icon-secondary" />
-            </Button>
+            <ShowAllToggle open={open} count={conflicts.length} onToggle={setOpen} />
             {open ? (
               <ul className="m-0 mt-1 list-[circle] pl-4">
                 {conflicts.map((c) => (

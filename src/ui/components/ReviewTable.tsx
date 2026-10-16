@@ -49,11 +49,13 @@ export interface CellProps {
   className?: string;
   /** Stays fully visible on a skipped row (its apply checkbox). */
   noDim?: boolean;
+  colSpan?: number;
 }
 
-export function Cell({ children, className = "", noDim = false }: CellProps) {
+export function Cell({ children, className = "", noDim = false, colSpan }: CellProps) {
   return (
     <td
+      colSpan={colSpan}
       className={`px-1.5 py-1 align-middle first:pl-0 ${noDim ? "" : "group-data-[dimmed]/row:opacity-50"} ${className}`}
     >
       {children}
