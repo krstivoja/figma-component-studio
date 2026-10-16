@@ -6,6 +6,7 @@ const TOOLS: readonly StudioToolName[] = [
   "studio_get_tokens",
   "studio_propose_names",
   "studio_propose_tokens",
+  "studio_inspect_variables",
 ];
 const RETRY_FIRST_MS = 3000;
 const RETRY_MAX_MS = 10000;

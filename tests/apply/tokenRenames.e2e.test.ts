@@ -145,7 +145,7 @@ describe("property split: padding -> paddingX + paddingY (card-markooo)", () => 
     expect(componentNames(f)).toEqual(["card-markooo/color/background", "card-markooo/spacing/paddingY", "card-markooo/spacing/paddingX"]);
     const created = f.world.variables.get((f.root.boundVariables.paddingLeft as { id: string }).id)!;
     expect(created.pluginData).toEqual({ createdBy: "component-studio", componentId: f.root.id });
-    expect(summarizeResult(result, "tokens")).toBe("Step 2: create tokens applied. 1 tokens created, 0 reused, 2 bound, 1 renamed");
+    expect(summarizeResult(result, "tokens")).toBe("Create tokens applied. 1 tokens created, 0 reused, 2 bound, 1 renamed");
     expect(renamedTokensText(result)).toBe("- card-markooo/spacing/padding -> card-markooo/spacing/paddingY");
 
     const again = (await scan(f)).proposal;

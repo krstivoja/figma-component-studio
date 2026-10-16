@@ -1,5 +1,6 @@
 import { creationOrder } from "./apply";
 import { inRoleFamily } from "./match";
+import { parseValueConflict } from "./tokenNames";
 import { sortByTokenName } from "./tokenPicker";
 import type {
   ApplyResult,
@@ -475,7 +476,7 @@ export function countChecked(p: Proposal): { renames: number; tokens: number; ty
 }
 
 export function stepTitle(phase: Phase): string {
-  return phase === "rename" ? "Step 1: rename layers" : "Step 2: create tokens";
+  return phase === "rename" ? "Rename layers" : "Create tokens"; // the tab labels
 }
 
 export function summarizeResult(r: ApplyResult, phase: Phase): string {
@@ -516,4 +517,102 @@ export function lookChangeView(result: ApplyResult, applied: Proposal | null): L
   const intended =
     !!applied && (applied.tokens.some((t) => t.match === "manual" && !t.skip) || (applied.typography ?? []).some((t) => t.match === "manual" && !t.skip));
   return { kind: intended ? "intended" : "loud", lines: result.snapshotDiff.slice() };
+}
+
+// The review model with the user's edits laid over it (what the tables show).
+export function editedModel(p: Proposal, semantic: SemanticOption[], edits: Edits): ReviewModel {
+  const model = buildReviewModel(p, semantic);
+  if (edits.newComponentName !== undefined && model.newComponentName !== null) model.newComponentName = edits.newComponentName;
+  for (const r of model.renames) {
+    const e = edits.renames.find((x) => x.index === r.index);
+    if (e) Object.assign(r, { newName: e.newName, apply: e.apply });
+  }
+  for (const t of model.typography) {
+    const e = edits.typography?.find((x) => x.key === t.key);
+    if (e) t.apply = e.apply;
+  }
+  for (const t of model.tokens) {
+    const e = edits.tokens.find((x) => x.key === t.key);
+    if (!e) continue;
+    Object.assign(t, { name: e.name, apply: e.apply, aliasDesktop: e.aliasDesktop, aliasMobile: e.aliasMobile });
+    t.splitModes = t.splitModes || e.aliasDesktop !== e.aliasMobile;
+  }
+  return model;
+}
+
+// Edits as a fresh proposal arrives: every row as proposed.
+export function initialEdits(model: ReviewModel): Edits {
+  return {
+    newComponentName: model.newComponentName,
+    renames: model.renames.map((r) => ({ index: r.index, newName: r.newName, apply: r.apply })),
+    tokens: model.tokens.map((t) => ({
+      key: t.key,
+      name: t.name,
+      apply: t.apply,
+      aliasDesktop: t.aliasDesktop,
+      aliasMobile: t.aliasMobile,
+    })),
+    typography: model.typography.map((t) => ({ key: t.key, apply: t.apply })),
+  };
+}
+
+// Edit entry for a row adopted from "No match": it starts as the adopted token proposes.
+export function trackAdopted(edits: Edits, p: Proposal, key: string): Edits {
+  const t = p.tokens.find((x) => x.key === key);
+  if (!t || edits.tokens.some((e) => e.key === key)) return edits;
+  return {
+    ...edits,
+    tokens: [...edits.tokens, { key, name: t.name, apply: true, aliasDesktop: t.alias.desktop, aliasMobile: t.alias.mobile }],
+  };
+}
+
+const plural = (n: number, word: string, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
+
+export function countsText(phase: Phase, counts: ReturnType<typeof countChecked>, problems: number): string {
+  const main =
+    phase === "rename"
+      ? plural(counts.renames, "rename")
+      : plural(counts.tokens, "token") + (counts.typography ? ` · ${plural(counts.typography, "text style")}` : "");
+  return main + (problems ? ` · ${plural(problems, "problem")} to fix` : "");
+}
+
+// Apply needs at least one change and no validation problem.
+export function canApply(current: Proposal): boolean {
+  const counts = countChecked(current);
+  const nameChanged = current.newComponentName !== null && current.newComponentName !== current.componentName;
+  return findProblems(current).length === 0 && (counts.renames > 0 || counts.tokens > 0 || counts.typography > 0 || nameChanged);
+}
+
+export function storedBannerText(stored: { phase: Phase; count: number }): string {
+  const what = stored.phase === "rename" ? "Claude updated the layer names" : "Claude suggested tokens";
+  return `${what} (${stored.count})`;
+}
+
+export function emptyReviewText(phase: Phase, hasWarnings: boolean): string {
+  if (hasWarnings) return "No rows to apply; check the warnings above.";
+  return phase === "rename"
+    ? "Nothing to rename, all layer names follow the convention."
+    : "Nothing to tokenize, every value is already bound to a token.";
+}
+
+// "button/color/bg (#0059FF)" -> value "#0059FF" over token "button/color/bg"; null when it has no value part.
+export function splitRawDisplay(display: string): { value: string; token: string } | null {
+  const m = /^(.*) \(([^()]*)\)$/.exec(display);
+  return m ? { value: m[2], token: m[1] } : null;
+}
+
+export interface WarningGroups {
+  other: string[];
+  /** "maps to different values" warnings, grouped into one line when there are two or more. */
+  conflicts: Array<{ name: string; values: string }>;
+}
+
+export function groupWarnings(warnings: string[]): WarningGroups {
+  const conflicts = warnings.map(parseValueConflict).filter((c): c is NonNullable<typeof c> => !!c);
+  if (conflicts.length < 2) return { other: warnings, conflicts: [] };
+  return { other: warnings.filter((w) => !parseValueConflict(w)), conflicts };
+}
+
+export function conflictSummaryText(count: number): string {
+  return `${count} token names map to different values; rename one row of each before applying.`;
 }

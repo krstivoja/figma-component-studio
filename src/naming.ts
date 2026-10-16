@@ -71,9 +71,13 @@ export function proposeLayerNames(root: LayerNode): LayerRename[] {
   return out;
 }
 
+export function isSlotName(name: string): boolean {
+  return SLOT_NAME.test(name);
+}
+
 function evaluate(node: LayerNode, ctx: Ctx): LayerRename | null {
   const current = node.name;
-  if (SLOT_NAME.test(current)) return null;
+  if (isSlotName(current)) return null;
   if (isUnnamed(node, ctx.rootName)) {
     const pick = parentRule(node, ctx) ?? propose(node, ctx);
     return pick && pick.name !== current ? rename(node, pick) : null;
@@ -361,7 +365,7 @@ function isIconish(n: LayerNode): boolean {
 }
 
 // A glyph: icon-sized and made only of raw shapes, so its insides are not separate parts.
-function isIconGlyph(n: LayerNode): boolean {
+export function isIconGlyph(n: LayerNode): boolean {
   return n.kind !== "INSTANCE" && isIconish(n) && visible(n).every((c) => RAW_SHAPES.has(c.kind));
 }
 

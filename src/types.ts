@@ -118,6 +118,12 @@ export interface VariantScan {
   uses: RawValueUse[];
   boundUses?: RawValueUse[]; // values already bound to a variable, re-checked in the tokens step
   missingBindings?: number; // bindings to deleted or unloadable variables, scanned as raw values
+  missingUses?: MissingBinding[]; // where those bindings were, for the QA report
+}
+
+export interface MissingBinding {
+  indexPath: number[];
+  field: BindableField | TypographyField;
 }
 
 export interface ComponentScan {
@@ -137,6 +143,8 @@ export interface CatalogVariable {
   values: Record<string, { number?: number; hex?: string; opacity?: number; string?: string }>; // by mode name
   aliasOf?: Record<string, string>; // direct alias target variable id by mode name, only modes that alias
   componentId?: string; // plugin data on components tokens this plugin created: the root they belong to
+  remote?: true; // bound in the selection from a library, not a local variable (QA catalog only)
+  aliasKeys?: Record<string, string>; // library variables: alias target as `primitiveKey` by mode (targets are not in the catalog)
 }
 
 // A semantic variable as the review UI sees it; `light` for colors, `value` (desktop) for numbers.
@@ -210,6 +218,8 @@ export interface TokenProposal {
   previousName?: string; // rename only: the token's current name
   previousAlias?: Record<Mode, string | null>; // alias-change only: the alias it has now
   pairOptions?: string[]; // text/icon: variable ids that pair with the surface (same-state default first, then intents)
+  issue?: "surface-pairing" | "property-split"; // why the row exists beyond tokenizing: wrong color pairing, or one token split by property (QA report)
+  wrongFamily?: boolean; // surface-pairing only: the bound color is from another role family (a surface on text, on-surface on a fill, border off strokes)
 }
 
 export interface TypographyUse {
@@ -278,7 +288,8 @@ export type StudioToolName =
   | "studio_get_component"
   | "studio_get_tokens"
   | "studio_propose_names"
-  | "studio_propose_tokens";
+  | "studio_propose_tokens"
+  | "studio_inspect_variables";
 
 export interface BridgeRequest {
   id: string;
@@ -312,6 +323,9 @@ export type UiToPlugin =
   | { type: "component/scan"; phase: Phase; useClaude: boolean; assume?: RowChoice[] }
   | { type: "component/apply"; proposal: Proposal }
   | { type: "component/cancel" }
+  | { type: "component/check"; useClaude: boolean } // QA mode: read-only lint, answered with component/report
+  | { type: "qa/select"; nodeIds: string[] } // selects report layers on the canvas; selection only, the file is unchanged
+  | { type: "ui/ready" } // UI listener is up; the plugin answers with plugin/launch
   | { type: "bridge/request"; request: BridgeRequest };
 
 export type PluginToUi =
@@ -326,4 +340,63 @@ export type PluginToUi =
   | { type: "component/applied"; phase: Phase; result: ApplyResult }
   | { type: "component/error"; message: string }
   | { type: "bridge/response"; response: BridgeResponse }
-  | { type: "claude/proposal-stored"; phase: Phase; count: number };
+  | { type: "claude/proposal-stored"; phase: Phase; count: number }
+  | { type: "component/report"; report: QaReport }
+  | { type: "plugin/launch"; command: LaunchCommand };
+
+// figma.command: "check" comes from the sidebar relaunch button and opens straight into QA mode.
+export type LaunchCommand = "open" | "check";
+
+export const RELAUNCH_CHECK_DESCRIPTION = "Lint names and tokens";
+
+export type QaSeverity = "error" | "warning" | "info";
+
+export type QaKind =
+  | "component-name"
+  | "default-name"
+  | "content-name"
+  | "keyboard-mash"
+  | "synonym"
+  | "naming-convention"
+  | "not-in-vocabulary"
+  | "raw-value"
+  | "deleted-binding"
+  | "semantic-binding"
+  | "surface-pairing"
+  | "role-family"
+  | "stale-token-name"
+  | "property-split"
+  | "token-mismatch"
+  | "unbound-typography"
+  | "library-token";
+
+export interface QaColor {
+  hex: string;
+  opacity: number;
+}
+
+export interface QaFinding {
+  id: string;
+  area: "naming" | "tokens";
+  kind: QaKind;
+  severity: QaSeverity;
+  issue: string; // short label, e.g. "Default Figma name"
+  layer: string; // path of the first layer, "root / child / leaf"
+  nodeIds: string[]; // every layer the finding covers, selected on row click
+  current: string;
+  currentColor: QaColor | null;
+  suggestion: string | null;
+  suggestionColor: QaColor | null;
+  source: "claude" | "rules" | null; // who proposed the suggestion
+  detail: string | null;
+  suggestionNote?: string; // under the suggestion, e.g. a partner token that is only in the library
+}
+
+export interface QaReport {
+  componentId: string;
+  componentName: string;
+  naming: NamingSource;
+  findings: QaFinding[];
+  notes: string[]; // scan warnings that are not tied to one layer
+  draft?: boolean; // the root is a plain frame: only checks that hold before it becomes a component
+}

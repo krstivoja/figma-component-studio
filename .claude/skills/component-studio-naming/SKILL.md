@@ -20,7 +20,7 @@ This skill never renames anything, there is no apply tool.
 
 - Call `studio_status`.
 - If it says Component Studio is not open, tell the user to open it in Figma (Plugins > Development > Component Studio). It connects by itself. Then stop.
-- Check the selected root. If there is none, ask the user to select the component, component set or top-level frame, then stop.
+- Check the selected root. If there is none, ask the user to select the component, component set or frame, then stop.
 
 ## 2. Read
 
@@ -28,7 +28,7 @@ This skill never renames anything, there is no apply tool.
 - It returns the tree of the reference variant (`path`, `indexPath`, `id`, `type`, `name`, `visible`, `size`, `layout`, `text`, `fontSize`, `fills`, `mainComponent`, `nameClass`), the placement (page, parent, neighbours), the `structureHash` and a PNG screenshot.
 - Keep the `rootId` from the result, step 4 needs it.
 - Call it once. One screenshot is enough, not one per variant.
-- The plugin resolves the root with its own rules (component set, then component, then top-level frame).
+- The plugin resolves the root with its own rules (component set, then component, otherwise the selected frame or the nearest frame around the selected layer).
 
 ## 3. Decide names
 
@@ -75,7 +75,7 @@ Short and scannable:
 - A table: old name, new name, reason.
 - The count, and the proposed component name if there is one.
 - Anything outside the vocabulary, deliberate names with a synonym suggestion, and any structure suggestion (for example "these 3 items could be wrapped in a `list`").
-- End with: "In Component Studio click Load it on the banner (or tick Help with Claude Code and click 1. Rename layers), review, then Apply."
+- End with: "In Component Studio click Load it on the banner (or open the Rename layers tab, tick Help with Claude Code and click Scan), review, then Apply."
 
 ## Gotchas
 

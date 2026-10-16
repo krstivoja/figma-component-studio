@@ -1,9 +1,22 @@
 /// <reference types="@figma/plugin-typings" />
 
-import { resolveValue } from "./match";
+import { primitiveKey, resolveValue } from "./match";
 import { isUnnamed, normalizeComponentName, proposeLayerNames } from "./naming";
 import { buildProposal, countTokenRenames } from "./proposal";
-import { aggregateVariantProperties, loadCatalog, parseVariantName, scanComponent, type ScanRoot } from "./scan";
+import {
+  aggregateVariantProperties,
+  catalogVariable,
+  createResolver,
+  isAlias,
+  isRgb,
+  loadCatalog,
+  normalizeVariableName,
+  parseVariantName,
+  scanComponent,
+  toHex,
+  type ScanRoot,
+  type VariableResolver,
+} from "./scan";
 import { aliasTargetProblem, isAliasTarget, type TokenSuggestion } from "./storedProposal";
 import { structureHash } from "./structureHash";
 import { vocabularyEntry } from "./vocabulary";
@@ -14,6 +27,8 @@ import {
   type BridgeRequest,
   type BridgeResponse,
   type Catalog,
+  type CatalogVariable,
+  type ComponentScan,
   type LayerNode,
   type Proposal,
   type RawValueUse,
@@ -30,26 +45,24 @@ const SELECTION_CHANGED = "The selection changed; ask again after selecting the 
 
 type Bag = Record<string, unknown>;
 
-function isTopLevel(node: BaseNode): boolean {
-  return node.parent?.type === "PAGE" || node.parent?.type === "SECTION";
-}
-
-// Any layer inside a component or a top-level frame resolves to that root, so the whole tree is reviewed at once.
+// Any layer inside a component resolves to that component, so the whole tree is reviewed at once.
+// Outside a component the selected frame itself is the root (or the nearest frame around a selected text or shape),
+// so a part of a design can be checked before it becomes a component.
 export function selectedRoot(): ScanRoot {
   const selection = figma.currentPage.selection;
   if (selection.length !== 1) {
-    throw new Error("Select one component, component set or top-level frame (or any layer inside it).");
+    throw new Error("Select one component, component set or frame (or any layer inside it).");
   }
   let node: BaseNode | null = selection[0];
-  let topFrame: FrameNode | null = null;
+  let nearestFrame: FrameNode | null = null;
   while (node && node.type !== "PAGE" && node.type !== "DOCUMENT") {
     if (node.type === "COMPONENT_SET") return node;
     if (node.type === "COMPONENT") return node.parent?.type === "COMPONENT_SET" ? node.parent : node;
-    if (node.type === "FRAME" && isTopLevel(node)) topFrame = node;
+    if (node.type === "FRAME" && !nearestFrame) nearestFrame = node;
     node = node.parent;
   }
-  if (topFrame) return topFrame;
-  throw new Error("The selection is not inside a component or a top-level frame.");
+  if (nearestFrame) return nearestFrame;
+  throw new Error("The selection is not inside a component or a frame.");
 }
 
 export function referenceVariant(root: ScanRoot): ComponentNode | FrameNode {
@@ -75,25 +88,39 @@ export async function staleTokenCount(node: ScanRoot): Promise<number> {
   return countTokenRenames(scan, await loadCatalog(), normalizeComponentName(scan.name) ?? scan.name, await otherComponentNames(node));
 }
 
-export async function scanForTokens(node: ScanRoot, catalog: Catalog, assume: RowChoice[] = []): Promise<Proposal> {
-  const scan = await scanComponent(node);
+// `scanned` reuses a scan of `node` taken moments ago (the QA check scans once for names and tokens).
+export async function scanForTokens(node: ScanRoot, catalog: Catalog, assume: RowChoice[] = [], scanned?: ComponentScan): Promise<Proposal> {
+  const { proposal, stepHints, setup } = await tokenScan(node, catalog, assume, scanned);
+  return { ...proposal, warnings: [...setup, ...stepHints, ...proposal.warnings] };
+}
+
+// The token proposal plus, apart from its warnings, the file setup problems and the hints that point back to step 1
+// (the QA report shows those hints as naming rows instead).
+export async function tokenScan(
+  node: ScanRoot,
+  catalog: Catalog,
+  assume: RowChoice[] = [],
+  scanned?: ComponentScan,
+): Promise<{ proposal: Proposal; stepHints: string[]; setup: string[] }> {
+  const scan = scanned ?? (await scanComponent(node));
   const normalized = normalizeComponentName(scan.name);
   const proposal = buildProposal(scan, catalog, [], normalized ?? scan.name, assume, await otherComponentNames(node));
-  const warnings = [...proposal.warnings];
+  const stepHints: string[] = [];
+  const setup: string[] = [];
 
   const pendingRenames = proposeLayerNames(scan.variants[0].root).filter((r) => !r.skip).length;
   if (pendingRenames > 0) {
-    warnings.unshift(
-      `${pendingRenames} layer${pendingRenames === 1 ? "" : "s"} still need a better name. Run "1. Rename layers" first, token names are built from layer names.`,
+    stepHints.push(
+      `${pendingRenames} layer${pendingRenames === 1 ? "" : "s"} still need a better name. Run "Rename layers" first, token names are built from layer names.`,
     );
   }
   if (normalized !== null) {
-    warnings.unshift(`Component name "${scan.name}" does not follow the convention; tokens use "${normalized}". Rename it in step 1.`);
+    stepHints.unshift(`Component name "${scan.name}" does not follow the convention; tokens use "${normalized}". Rename it in step 1.`);
   }
   if (catalog.componentsCollectionId === null) {
-    warnings.unshift('No "components" variable collection in this file. Tokens cannot be created until it exists.');
+    setup.push('No "components" variable collection in this file. Tokens cannot be created until it exists.');
   }
-  return { ...proposal, newComponentName: null, renames: [], warnings };
+  return { proposal: { ...proposal, newComponentName: null, renames: [] }, stepHints, setup };
 }
 
 export type NameClass = "unnamed" | "vocabulary" | "deliberate";
@@ -461,6 +488,269 @@ async function proposeTokens(args: Bag) {
   return { stored: suggestions.length, rejected };
 }
 
+// ---- studio_inspect_variables: strictly read only (no import*, set*, create* calls) ----
+
+export const INSPECT_MAX_VARIABLES = 300;
+export const INSPECT_MAX_USED_BY = 50;
+const INSPECT_MAX_LIBRARY_COLLECTIONS = 100;
+const PATH_SEPARATOR = " › ";
+
+export interface BindingUse {
+  layerPath: string;
+  field: string;
+}
+
+type InspectValue = string | number | boolean | null;
+
+export interface BoundVariableInfo {
+  id: string;
+  name: string | null;
+  resolvedType: string | null;
+  collection: { id: string; name: string | null } | null;
+  remote: boolean;
+  key: string | null;
+  libraryCollection?: string | null;
+  libraryName?: string | null;
+  /** The variable is gone (null by id) or soft-deleted (still returned by id, no longer in its collection). */
+  missing?: true;
+  values: Record<string, InspectValue>;
+  aliasOf?: Record<string, string>;
+  usedBy: BindingUse[];
+  usedByTruncated?: true;
+}
+
+function aliasIdsIn(value: unknown, field: string, out: Array<{ field: string; id: string }>): void {
+  if (Array.isArray(value)) {
+    value.forEach((v, i) => aliasIdsIn(v, value.length === 1 ? field : `${field}[${i}]`, out));
+  } else if (isAlias(value)) {
+    out.push({ field, id: value.id });
+  } else if (value && typeof value === "object") {
+    for (const [k, v] of Object.entries(value as Bag)) aliasIdsIn(v, `${field}.${k}`, out);
+  }
+}
+
+function paintAliases(paints: unknown, field: string, out: Array<{ field: string; id: string }>): void {
+  if (!Array.isArray(paints)) return;
+  paints.forEach((p, i) => {
+    const bv = (p as Bag | null)?.boundVariables;
+    if (bv && typeof bv === "object") aliasIdsIn(bv, `${field}[${i}]`, out);
+  });
+}
+
+/** Every variable binding on one node: node.boundVariables (all fields), paints, effects, and mixed text segments. */
+export function nodeBindings(node: SceneNode): Array<{ field: string; id: string }> {
+  const out: Array<{ field: string; id: string }> = [];
+  const bag = node as unknown as Bag;
+  const bound = ("boundVariables" in node ? node.boundVariables : undefined) as Bag | undefined;
+  for (const [field, value] of Object.entries(bound ?? {})) {
+    // Paint and effect bindings are read from the paints themselves, so the index is the real one.
+    if (field === "fills" || field === "strokes" || field === "effects") continue;
+    aliasIdsIn(value, field, out);
+  }
+  paintAliases(bag.fills, "fills", out);
+  paintAliases(bag.strokes, "strokes", out);
+  paintAliases(bag.effects, "effects", out);
+  if (node.type === "TEXT" && typeof node.getStyledTextSegments === "function") {
+    const mixedFills = node.fills === figma.mixed;
+    let segments: Array<Bag> = [];
+    try {
+      segments = node.getStyledTextSegments(["fills", "boundVariables"]) as unknown as Bag[];
+    } catch {
+      segments = [];
+    }
+    const nodeLevel = new Set(Object.keys(bound ?? {}));
+    for (const seg of Array.isArray(segments) ? segments : []) {
+      const range = `text[${String(seg.start)}-${String(seg.end)}]`;
+      if (mixedFills) paintAliases(seg.fills, `${range}.fills`, out);
+      for (const [field, value] of Object.entries((seg.boundVariables as Bag | undefined) ?? {})) {
+        if (!nodeLevel.has(field)) aliasIdsIn(value, `${range}.${field}`, out);
+      }
+    }
+  }
+  return out;
+}
+
+function inspectValue(value: VariableValue | null): InspectValue {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" || typeof value === "string" || typeof value === "boolean") return value;
+  if (isRgb(value)) return hexWithAlpha(toHex(value), "a" in value ? value.a : 1);
+  return null;
+}
+
+async function describeVariable(id: string, resolver: VariableResolver): Promise<Omit<BoundVariableInfo, "usedBy">> {
+  const v = await resolver.getVariable(id);
+  if (!v) return { id, name: null, resolvedType: null, collection: null, remote: false, key: null, missing: true, values: {} };
+  const col = await resolver.getCollection(v.variableCollectionId);
+  const info: Omit<BoundVariableInfo, "usedBy"> = {
+    id,
+    name: v.name,
+    resolvedType: v.resolvedType,
+    collection: { id: v.variableCollectionId, name: col?.name ?? null },
+    remote: v.remote === true,
+    key: typeof v.key === "string" ? v.key : null,
+    values: {},
+  };
+  if (!v.remote && col && !col.variableIds.includes(v.id)) info.missing = true;
+  const aliasOf: Record<string, string> = {};
+  for (const mode of col?.modes ?? []) {
+    info.values[mode.name] = inspectValue(await resolver.resolve(v, mode.name, mode.modeId));
+    const raw = v.valuesByMode[mode.modeId];
+    if (isAlias(raw)) aliasOf[mode.name] = (await resolver.getVariable(raw.id))?.name ?? raw.id;
+  }
+  if (Object.keys(aliasOf).length) info.aliasOf = aliasOf;
+  return info;
+}
+
+export async function collectBoundVariables(
+  root: SceneNode,
+  resolver: VariableResolver,
+): Promise<{ variables: BoundVariableInfo[]; truncated: boolean }> {
+  const uses = new Map<string, BindingUse[]>();
+  const overflow = new Set<string>();
+  let truncated = false;
+  const walk = (node: SceneNode, path: string) => {
+    const seen = new Set<string>();
+    for (const { field, id } of nodeBindings(node)) {
+      const k = `${id}|${field}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      let list = uses.get(id);
+      if (!list) {
+        if (uses.size >= INSPECT_MAX_VARIABLES) {
+          truncated = true;
+          continue;
+        }
+        list = [];
+        uses.set(id, list);
+      }
+      if (list.length >= INSPECT_MAX_USED_BY) {
+        overflow.add(id);
+        truncated = true;
+        continue;
+      }
+      list.push({ layerPath: path, field });
+    }
+    if ("children" in node) for (const c of node.children) walk(c, `${path}${PATH_SEPARATOR}${c.name}`);
+  };
+  walk(root, root.name);
+
+  const variables: BoundVariableInfo[] = [];
+  for (const [id, usedBy] of uses) {
+    const info = await describeVariable(id, resolver);
+    variables.push({ ...info, usedBy, ...(overflow.has(id) ? { usedByTruncated: true as const } : {}) });
+  }
+  return { variables, truncated };
+}
+
+// Only the color collection's names are normalised in the catalog: role families and surface pairing read colors
+// as "color/…", while typography ("font/…"), dimensions and components keep the names their rules expect.
+const NORMALISED_COLLECTION = "color";
+
+function normalized(v: CatalogVariable): CatalogVariable {
+  if (v.collection.trim().toLowerCase() !== NORMALISED_COLLECTION) return v;
+  const name = normalizeVariableName(v.name, NORMALISED_COLLECTION);
+  return name === v.name ? v : { ...v, name };
+}
+
+/** Same name in the same collection once both are normalised: a library variable the file also has locally. */
+export function equivalenceKey(v: Pick<CatalogVariable, "name" | "collection">): string {
+  return `${v.collection.trim().toLowerCase()}|${normalizeVariableName(v.name, v.collection)}`;
+}
+
+// QA's catalog: the local variables plus every variable bound in the selection (library ones included, marked
+// `remote`), resolved with the shared resolver. Strictly read only: nothing is imported. Step 2 keeps `loadCatalog`.
+export async function withBoundVariables(catalog: Catalog, root: SceneNode): Promise<Catalog> {
+  const local = await figma.variables.getLocalVariableCollectionsAsync();
+  const resolver = createResolver(local);
+  const { variables: bound } = await collectBoundVariables(root, resolver);
+  const known = new Set(catalog.variables.map((v) => v.id));
+  const added: CatalogVariable[] = [];
+  for (const info of bound) {
+    if (info.missing || !info.remote || known.has(info.id)) continue;
+    const v = await resolver.getVariable(info.id);
+    const col = v ? await resolver.getCollection(v.variableCollectionId) : null;
+    const entry = v && col ? await catalogVariable(v, col, resolver.resolve) : null;
+    if (!entry) continue;
+    // Alias targets by name, so a library surface can be matched to a local one aliasing the same primitive.
+    const aliasKeys: Record<string, string> = {};
+    for (const [mode, id] of Object.entries(entry.aliasOf ?? {})) {
+      const target = await resolver.getVariable(id);
+      const tcol = target ? await resolver.getCollection(target.variableCollectionId) : null;
+      if (target && tcol) aliasKeys[mode] = primitiveKey(target.name, tcol.name);
+    }
+    added.push({ ...entry, remote: true, ...(Object.keys(aliasKeys).length ? { aliasKeys } : {}) });
+  }
+  // Local first: a library variable with the same name never shadows the file's own.
+  return { ...catalog, variables: [...catalog.variables, ...added].map(normalized) };
+}
+
+async function libraryCollections(): Promise<
+  | { collections: Array<{ name: string; libraryName: string; key: string; variableCount: number | null; error?: string }>; truncated: boolean }
+  | { error: string }
+> {
+  try {
+    const available = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+    const list = available.slice(0, INSPECT_MAX_LIBRARY_COLLECTIONS);
+    const collections = await Promise.all(
+      list.map(async (c) => {
+        const row = { name: c.name, libraryName: c.libraryName, key: c.key };
+        try {
+          // Names and types only: nothing is imported into the file.
+          const vars = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(c.key);
+          return { ...row, variableCount: vars.length };
+        } catch (e) {
+          return { ...row, variableCount: null, error: errorText(e) };
+        }
+      }),
+    );
+    return { collections, truncated: available.length > list.length };
+  } catch (e) {
+    return { error: `Library collections are not available: ${errorText(e)}` };
+  }
+}
+
+export async function inspectVariables() {
+  const local = await figma.variables.getLocalVariableCollectionsAsync();
+  const resolver = createResolver(local);
+  const localCollections = local.map((c) => ({
+    id: c.id,
+    name: c.name,
+    modes: c.modes.map((m) => m.name),
+    variableCount: c.variableIds.length,
+    hiddenFromPublishing: c.hiddenFromPublishing === true,
+  }));
+  const libraries = await libraryCollections();
+
+  let root: ScanRoot | null = null;
+  let selectionError: string | undefined;
+  try {
+    root = selectedRoot();
+  } catch (e) {
+    selectionError = errorText(e);
+  }
+  let bound: BoundVariableInfo[] = [];
+  let truncated = false;
+  if (root) {
+    ({ variables: bound, truncated } = await collectBoundVariables(root, resolver));
+    // A remote collection's library name comes from the team library list, matched by collection key.
+    const libraryByKey = new Map("collections" in libraries ? libraries.collections.map((c) => [c.key, c.libraryName]) : []);
+    for (const v of bound) {
+      if (!v.remote || !v.collection) continue;
+      const col = await resolver.getCollection(v.collection.id);
+      v.libraryCollection = col?.name ?? null;
+      v.libraryName = (col && libraryByKey.get(col.key)) ?? null;
+    }
+  }
+  return {
+    root: root ? { id: root.id, name: root.name, type: root.type } : null,
+    ...(selectionError ? { selectionError } : {}),
+    localCollections,
+    bound,
+    truncated,
+    libraryCollections: libraries,
+  };
+}
+
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -480,6 +770,8 @@ export async function handleBridgeRequest(req: BridgeRequest): Promise<BridgeRes
         return { id, ok: true, result: await proposeNames(args) };
       case "studio_propose_tokens":
         return { id, ok: true, result: await proposeTokens(args) };
+      case "studio_inspect_variables":
+        return { id, ok: true, result: await inspectVariables() };
       default:
         return { id, ok: false, error: `Unknown tool ${String((req as { tool?: unknown }).tool)}.` };
     }

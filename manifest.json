@@ -5,6 +5,11 @@
   "main": "dist/code.js",
   "ui": "dist/ui.html",
   "editorType": ["figma"],
+  "relaunchButtons": [
+    { "command": "open", "name": "Open Component Studio" },
+    { "command": "check", "name": "Check with Component Studio" }
+  ],
+  "permissions": ["teamlibrary"],
   "networkAccess": {
     "allowedDomains": ["ws://localhost:9240"],
     "devAllowedDomains": ["ws://localhost:9240"],

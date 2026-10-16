@@ -22,7 +22,7 @@ Read only these sections, do not rely on memory.
 
 - Call `studio_status`.
 - If it says Component Studio is not open, tell the user to open it in Figma (Plugins > Development > Component Studio). It connects by itself. Then stop.
-- If no root is selected, ask the user to select the component, component set or top-level frame, then stop.
+- If no root is selected, ask the user to select the component, component set or frame, then stop.
 
 ## 3. Read tokens
 
@@ -75,7 +75,7 @@ Short and scannable:
 - A table: value, suggested token, reason.
 - A second list of values left out and why (no fitting token, needs a person to add one).
 - Which suggestions change the look.
-- End with: "In Component Studio click Load it on the banner (or tick Help with Claude Code and click 2. Create tokens), review, then Apply."
+- End with: "In Component Studio click Load it on the banner (or open the Create tokens tab, tick Help with Claude Code and click Scan), review, then Apply."
 
 ## Gotchas
 

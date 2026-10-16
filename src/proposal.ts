@@ -19,6 +19,7 @@ import {
   paddingProperties,
   toSegment,
   TOKEN_STATES,
+  valueConflictWarning,
 } from "./tokenNames";
 import {
   colorFamily,
@@ -29,6 +30,7 @@ import {
   modeWarnings,
   normalizeHex,
   preferEnabled,
+  primitiveKey,
   resolveValue,
   type Candidate,
   type NumberGroup,
@@ -83,6 +85,9 @@ interface Resolution {
   suggestion?: Suggestion;
   pairFix?: string; // value outside its role family or surface pair: alias is the fix, row comes checked
   fixLook?: boolean; // the fix changes the look
+  wrongFamily?: boolean; // the bound color is not in the role's family at all, not just unpaired
+  pairNote?: string; // text/icon: which token pairs with the surface, without the why
+  pairExpected?: string; // bound text/icon off its pair and no partner in the catalog: the partner's name
 }
 
 const PADDING_FIELDS = new Set(["paddingLeft", "paddingRight", "paddingTop", "paddingBottom"]);
@@ -169,8 +174,21 @@ function cornerProperty(field: string, form: CornerForm): string {
   return `cornerRadius${top ? "Top" : "Bottom"}${left ? "Left" : "Right"}`;
 }
 
+// For reading only (sub-pixel sizes like 16.666015625 read 16.67); value keys keep the exact number.
 function displayNumber(n: number): string {
-  return String(n);
+  return String(Math.round(n * 100) / 100);
+}
+
+// Numbers rounded to 2 decimals for reading: 16.666015625 and 16.66666603088379 both read 16.67.
+function conflictValues(list: Item[]): string[] {
+  const numbers = new Set<number>();
+  const other = new Set<string>();
+  for (const i of list) {
+    if (i.use.kind === "number" && !i.bound && i.use.number !== null) numbers.add(Math.round(i.use.number * 100) / 100);
+    else other.add(i.display);
+  }
+  const out = [...[...numbers].sort((a, b) => a - b).map(String), ...[...other].sort()];
+  return out.length === 1 ? [`${out[0]} with sub-pixel differences`] : out;
 }
 
 function displayColor(hex: string, opacity: number): string {
@@ -219,6 +237,52 @@ export const TOKEN_RENAME_NOTE = "No visible change. Renaming tokens can break d
 
 export function countTokenRenames(scan: ComponentScan, catalog: Catalog, componentName: string, otherComponents: string[] = []): number {
   return buildProposal(scan, catalog, [], componentName, [], otherComponents).tokens.filter((t) => t.kind === "rename").length;
+}
+
+export interface ValueCheck {
+  use: RawValueUse;
+  group: NumberGroup | null; // numbers only: padding, gap, corner-radius, stroke or size
+  bound: CatalogVariable | null; // the semantic or primitive variable the value is bound to
+  match: Resolution["match"];
+  target: CatalogVariable | null; // semantic token that fits; for a pairing problem, the fix
+  pairFix: string | null; // the value or binding is outside its role family or surface pair; `target` is the fix
+  wrongFamily: boolean; // the bound color is not in the role's family at all (a surface on text, on-surface on a fill)
+  pairNote: string | null; // bound text/icon with a fix (or an expected partner): which token pairs with the surface
+  pairExpected: string | null; // bound text/icon off its pair, partner not in the catalog: its name, as text only
+  note: string | null;
+  reason: string | null; // match "none" only
+  suggestion: Suggestion; // match "none" only: the role default or nearest step
+}
+
+// Each visible value checked on its own against the semantic tokens, before any component token exists (QA on a plain
+// frame). Same items, role families, surface pairing and matching as step 2 (`resolve`), without token names, grouping
+// or the second pass: text pairs with the surface it sits on now. Values bound to component tokens are left out.
+export function checkValues(scan: ComponentScan, catalog: Catalog): ValueCheck[] {
+  const out: ValueCheck[] = [];
+  for (const item of collectItems(scan, new Map(), catalog, NO_OVERRIDES)) {
+    if (item.bound?.collection === "components") continue;
+    const res = resolve(item, isMobile(item) ? "mobile" : "desktop", catalog, tieContext([item]));
+    out.push({
+      use: item.use,
+      group: item.group ?? null,
+      bound: item.bound ?? null,
+      match: res.match,
+      target: res.target,
+      pairFix: res.pairFix ?? null,
+      // Also without a fix in the catalog: a surface on text stays wrong even when there is nothing to suggest.
+      wrongFamily: !!res.wrongFamily || (!!item.bound && boundOutsideFamily(item, item.bound)),
+      pairNote: res.pairNote ?? null,
+      pairExpected: res.pairExpected ?? null,
+      note: res.note,
+      reason: res.reason,
+      suggestion: res.suggestion ?? null,
+    });
+  }
+  return out;
+}
+
+function boundOutsideFamily(item: Item, bound: CatalogVariable): boolean {
+  return item.use.kind === "color" && item.use.role !== "other" && bound.collection === "color" && !inRoleFamily(bound, item.use.role);
 }
 
 interface Owner {
@@ -305,10 +369,7 @@ function buildOnce(
       groups.push({ name, items: list });
       continue;
     }
-    const values = [...new Set(list.map((i) => i.display))].sort();
-    warnings.push(
-      `Token name "${name}" maps to different values (${values.join(", ")}); rename one row before applying.`,
-    );
+    warnings.push(valueConflictWarning(name, conflictValues(list)));
     const byValue = new Map<string, Item[]>();
     for (const i of list) byValue.set(i.valueKey, [...(byValue.get(i.valueKey) ?? []), i]);
     for (const sub of byValue.values()) groups.push({ name, items: sub });
@@ -398,6 +459,8 @@ function buildOnce(
       note: notes.length ? notes.join(" ") : null,
       skip: false,
       ...(wrap ? { kind: "wrap" as const } : {}),
+      ...(pairFix ? { issue: "surface-pairing" as const } : {}),
+      ...(pairFix && (dRes.wrongFamily || mRes.wrongFamily) ? { wrongFamily: true } : {}),
     };
     results.set(g, row);
     if (retarget) retargets.push({ row, existing: existing!, sample: dSample });
@@ -471,6 +534,7 @@ interface FamilyCheck {
   pair?: SurfacePair; // text/icon only
   fix: CatalogVariable | null; // set when the semantic target is outside the role family or the surface pair
   same: boolean; // the fix has the layer's current value
+  fits: boolean; // the semantic target is in the role family (and, for text/icons, pairs with the surface)
 }
 
 function familyCheck(item: Item, semantic: CatalogVariable | null, catalog: Catalog): FamilyCheck | null {
@@ -481,24 +545,30 @@ function familyCheck(item: Item, semantic: CatalogVariable | null, catalog: Cata
   const opacity = item.use.opacity ?? 1;
   if (role === "text" || role === "icon") {
     const pair = surfacePair(item);
-    if (semantic.collection === "color" && allowedIn(semantic.name, pair)) return { role, pair, fix: null, same: true };
+    if (semantic.collection === "color" && allowedIn(semantic.name, pair)) return { role, pair, fix: null, same: true, fits: true };
     const hit = pairedText(pair, hex, opacity, role, catalog);
-    return { role, pair, fix: hit?.variable ?? null, same: !!hit?.exact };
+    return { role, pair, fix: hit?.variable ?? null, same: !!hit?.exact, fits: false };
   }
-  if (inRoleFamily(semantic, role)) return { role, fix: null, same: true };
+  if (inRoleFamily(semantic, role)) return { role, fix: null, same: true, fits: true };
   const hit = familyMember(role, hex, opacity, catalog);
-  return { role, fix: hit?.variable ?? null, same: !!hit?.exact };
+  return { role, fix: hit?.variable ?? null, same: !!hit?.exact, fits: false };
 }
 
 function whyInvalid(v: CatalogVariable, role: RawValueUse["role"], pair: SurfacePair | undefined): string {
   return pair && inRoleFamily(v, role) ? `which does not pair with ${pair.label}` : `which is not a ${role} color`;
 }
 
+function pairSentence(role: RawValueUse["role"], name: string, pair: SurfacePair): string {
+  const where = pair.mappedFrom
+    ? `${pair.label} (mapped from library ${shortName(pair.mappedFrom)})`
+    : pair.closestTo
+      ? `${pair.label} (closest to ${pair.closestTo})`
+      : pair.label;
+  return `${role === "text" ? "Text" : "Icons"} on ${where} ${role === "text" ? "uses" : "use"} ${shortName(name)}`;
+}
+
 function fixSentence(role: RawValueUse["role"], fix: CatalogVariable, same: boolean, pair: SurfacePair | undefined): string {
-  if (pair) {
-    const where = pair.closestTo ? `${pair.label} (closest to ${pair.closestTo})` : pair.label;
-    return `${role === "text" ? "Text" : "Icons"} on ${where} ${role === "text" ? "uses" : "use"} ${shortName(fix.name)}`;
-  }
+  if (pair) return pairSentence(role, fix.name, pair);
   return `${same ? "Same value as" : `Closest ${role} is`} ${shortName(fix.name)} (${lightText(fix)})`;
 }
 
@@ -520,6 +590,19 @@ function resolveBound(item: Item, bound: CatalogVariable, catalog: Catalog): Res
       target: check.fix,
       pairFix: `Bound directly to ${shortName(bound.name)}, ${whyInvalid(bound, check.role, check.pair)}. ${fixSentence(check.role, check.fix, check.same, check.pair)}; ${lookText(check.same)}.`,
       fixLook: !check.same,
+      wrongFamily: !inRoleFamily(bound, check.role),
+      ...(check.pair ? { pairNote: `${fixSentence(check.role, check.fix, check.same, check.pair)}; ${lookText(check.same)}.` } : {}),
+    };
+  }
+  // Off its pair with no partner in the catalog (e.g. a library surface): name the partner, never import it.
+  if (check && !check.fits && check.pair) {
+    return {
+      ...exact,
+      alias: bound.id,
+      target: bound,
+      wrongFamily: !inRoleFamily(bound, check.role),
+      pairExpected: check.pair.defaultName,
+      pairNote: `${pairSentence(check.role, check.pair.defaultName, check.pair)}.`,
     };
   }
   return { ...exact, alias: bound.id, target: bound };
@@ -585,6 +668,7 @@ function recheckComponentTokens(
           ownRow(expected, token, sub, fixAlias, catalog, {
             manual: changes,
             checked: true,
+            ...(fix ? { issue: "surface-pairing" as const } : {}),
             note: fix
               ? `${layerList(sub)} uses ${token.name}, the name for the ${claimed.get(name)}; moves to its own token aliasing ${shortName(fix.name)} ${fixGoal(check!)}; ${lookText(!changes)}.`
               : `${layerList(sub)} uses ${token.name}, the name for the ${claimed.get(name)}; moves to its own token with the same alias, look unchanged.`,
@@ -598,6 +682,7 @@ function recheckComponentTokens(
           ownRow(expected, token, sub, fixAlias, catalog, {
             manual: changes,
             checked: true,
+            issue: "surface-pairing",
             note: fix
               ? `${layerList(sub)} sits on ${check!.pair!.label}, unlike the other layers on ${token.name}; moves to its own token aliasing ${shortName(fix.name)}; ${lookText(!changes)}.`
               : `${layerList(sub)} sits on another surface than the other layers on ${token.name}; moves to its own token with the same alias, look unchanged.`,
@@ -611,6 +696,7 @@ function recheckComponentTokens(
           ownRow(expected, token, sub, now, catalog, {
             manual: false,
             checked: true,
+            issue: "property-split",
             note: `${layerList(sub)} ${fields} now ${lastSegment(expected)}; the other uses stay on ${token.name}. Own token with the same alias, look unchanged.`,
           }),
         );
@@ -626,6 +712,8 @@ function recheckComponentTokens(
           ownRow(expected, token, sub, fixAlias, catalog, {
             manual: changes,
             checked: true,
+            issue: "surface-pairing",
+            wrongFamily: !inRoleFamily(semantic!, check!.role),
             note: `${layerList(sub)} uses ${token.name} from another component, ${whyInvalid(semantic!, check!.role, check!.pair)}. New own token aliasing ${shortName(fix.name)} ${fixGoal(check!)}; ${lookText(!changes)}.`,
           }),
         );
@@ -657,6 +745,7 @@ function recheckComponentTokens(
         ownRow(name, token, g.map((x) => x.i), alias, catalog, {
           manual: changes,
           checked: true,
+          issue: "surface-pairing",
           note: `${layerList(g.map((x) => x.i))} sits on ${c.pair.label}, unlike the other layers on ${token.name}; moves to its own token${c.fix ? ` aliasing ${shortName(c.fix.name)}; ${lookText(!changes)}.` : " with the same alias, look unchanged."}`,
         }),
       );
@@ -683,6 +772,8 @@ function recheckComponentTokens(
       skip: false,
       kind: "alias-change",
       previousAlias: now,
+      issue: "surface-pairing",
+      ...(inRoleFamily(semantic!, c.role) ? {} : { wrongFamily: true }),
     });
   }
   return { rows, moved };
@@ -723,8 +814,9 @@ function ownRow(
   items: Item[],
   alias: Record<Mode, string | null>,
   catalog: Catalog,
-  opts: { manual: boolean; note: string; checked?: boolean },
+  opts: { manual: boolean; note: string; checked?: boolean; issue?: TokenProposal["issue"]; wrongFamily?: boolean },
 ): TokenProposal {
+  const issue = { ...(opts.issue ? { issue: opts.issue } : {}), ...(opts.wrongFamily ? { wrongFamily: true } : {}) };
   const existing = catalog.variables.find((v) => v.collection === "components" && v.name === name);
   if (existing?.aliasOf && !sameAlias(currentAlias(existing), alias)) {
     const was = catalog.variables.find((v) => v.id === currentAlias(existing).desktop);
@@ -743,6 +835,7 @@ function ownRow(
       skip: true,
       kind: "alias-change",
       previousAlias: currentAlias(existing),
+      ...issue,
     };
   }
   return {
@@ -759,6 +852,7 @@ function ownRow(
     note: opts.note,
     skip: opts.checked ? false : opts.manual,
     kind: "rebind",
+    ...issue,
   };
 }
 
@@ -1131,6 +1225,58 @@ interface SurfacePair {
   defaults: string[]; // defaultName, plus "<name>/enabled" for surfaces without a state
   intents: string[]; // allowed only when the value matches exactly
   closestTo: string | null; // ancestor fill when it matched no surface exactly
+  mappedFrom?: string; // library surface the layer is bound to, mapped to this local one (`localEquivalent`)
+}
+
+// Alias target of `v` per mode, as a `primitiveKey`: library variables carry it, local ones point into the catalog.
+function aliasKeyOf(v: CatalogVariable, mode: string, catalog: Catalog): string | null {
+  const keyed = v.aliasKeys ? findMode(Object.keys(v.aliasKeys), mode) : undefined;
+  if (keyed !== undefined) return v.aliasKeys![keyed];
+  const k = v.aliasOf ? findMode(Object.keys(v.aliasOf), mode) : undefined;
+  const target = k !== undefined ? catalog.variables.find((x) => x.id === v.aliasOf![k]) : undefined;
+  return target ? primitiveKey(target.name, target.collection) : null;
+}
+
+function sameValue(a: CatalogVariable, b: CatalogVariable, mode: string): boolean {
+  const x = resolveValue(a, mode, []);
+  const y = resolveValue(b, mode, []);
+  if (!x?.hex || !y?.hex) return false;
+  return normalizeHex(x.hex) === normalizeHex(y.hex) && Math.round((x.opacity ?? 1) * 100) === Math.round((y.opacity ?? 1) * 100);
+}
+
+const roleRoot = (name: string) => name.split("/").slice(0, 2).join("/"); // "color/surface", "color/on-surface", …
+
+function sharedSegments(a: string, b: string): number {
+  const rest = (n: string) => n.split("/").slice(2);
+  const other = new Set(rest(b));
+  return rest(a).filter((s) => other.has(s)).length;
+}
+
+/**
+ * The file's own variable a library color stands for: same name, else (same role family, every mode of the
+ * library variable) the same alias targets, else the same resolved values. Several hits: same alias targets first,
+ * then the most shared name segments, then catalog order. Null for local variables and when nothing matches.
+ */
+export function localEquivalent(v: CatalogVariable, catalog: Catalog): CatalogVariable | null {
+  if (!v.remote || v.type !== "COLOR" || v.collection !== "color") return null;
+  const local = catalog.variables.filter((x) => !x.remote && x.type === "COLOR" && x.collection === "color");
+  const same = local.find((x) => x.name === v.name);
+  if (same) return same;
+  const modes = Object.keys(v.values);
+  if (!modes.length) return null;
+  const ranked = local
+    .filter((x) => roleRoot(x.name) === roleRoot(v.name))
+    .map((x, i) => {
+      const alias = modes.every((m) => {
+        const a = aliasKeyOf(v, m, catalog);
+        return a !== null && a === aliasKeyOf(x, m, catalog);
+      });
+      const value = alias || modes.every((m) => findMode(Object.keys(x.values), m) !== undefined && sameValue(v, x, m));
+      return { x, i, alias, value, shared: sharedSegments(v.name, x.name) };
+    })
+    .filter((c) => c.value)
+    .sort((a, b) => Number(b.alias) - Number(a.alias) || b.shared - a.shared || a.i - b.i);
+  return ranked[0]?.x ?? null;
 }
 
 function allowedIn(name: string, pair: SurfacePair): boolean {
@@ -1205,6 +1351,14 @@ function surfacePair(item: Item): SurfacePair {
   return item.surface?.pair ?? pairFor(null, null);
 }
 
+// A library surface pairs as the file's own surface it stands for (`localEquivalent`), so the partner is a local token.
+function boundSurfacePair(surface: CatalogVariable, catalog: Catalog): SurfacePair {
+  const local = surface.remote ? localEquivalent(surface, catalog) : null;
+  if (local && local.name !== surface.name && (local.name === PAGE || surfaceRest(local.name)))
+    return { ...pairFor(local, null), mappedFrom: surface.name };
+  return pairFor(surface, null);
+}
+
 // Surface = nearest ancestor with a visible solid fill (topmost paint), mapped to the closest surface token.
 function locateSurface(variant: VariantScan, path: number[], catalog: Catalog, overrides: SurfaceOverrides): { pair: SurfacePair; ownerPath: number[] } {
   const byId = (id: string | undefined) => (id ? catalog.variables.find((v) => v.id === id) : undefined);
@@ -1214,10 +1368,10 @@ function locateSurface(variant: VariantScan, path: number[], catalog: Catalog, o
     const fill = node ? [...node.fills].reverse().find((f) => f.opacity > 0) : undefined;
     if (!fill) continue;
     const override = byId(overrides.layers.get(fillKey(variant.id, ownerPath)) ?? (fill.boundVariableId ? overrides.tokens.get(fill.boundVariableId) : undefined));
-    if (override) return { pair: pairFor(override, null), ownerPath };
+    if (override) return { pair: boundSurfacePair(override, catalog), ownerPath };
     const boundVar = byId(fill.boundVariableId ?? undefined);
     const bound = boundVar ? semanticOf(boundVar, catalog) : null;
-    if (bound && (bound.name === PAGE || surfaceRest(bound.name))) return { pair: pairFor(bound, null), ownerPath };
+    if (bound && (bound.name === PAGE || surfaceRest(bound.name))) return { pair: boundSurfacePair(bound, catalog), ownerPath };
     const best = preferEnabled(matchColor(fill.hex, fill.opacity, "background", catalog).filter((c) => c.variable.collection === "color"))[0];
     if (!best) return { pair: pairFor(null, null), ownerPath };
     return { pair: pairFor(best.variable, best.exact ? null : displayColor(fill.hex, fill.opacity)), ownerPath };

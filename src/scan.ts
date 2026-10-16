@@ -6,6 +6,7 @@ import type {
   ComponentScan,
   LayerKind,
   LayerNode,
+  MissingBinding,
   RawValueUse,
   SolidPaint as PlainPaint,
   Sizing,
@@ -379,23 +380,29 @@ function boundIds(layer: LayerNode, out: Set<string> = new Set()): Set<string> {
 }
 
 // A binding to a deleted variable keeps the last value; it is treated as raw so it gets a token again.
-export function stripMissingBindings(layer: LayerNode, isLive: (id: string) => boolean): number {
+export function stripMissingBindings(layer: LayerNode, isLive: (id: string) => boolean, found: MissingBinding[] = []): number {
   let count = 0;
   for (const p of [...layer.fills, ...layer.strokes]) {
     if (classifyBinding(p.boundVariableId, isLive) !== "missing") continue;
     p.boundVariableId = null;
     count++;
+    found.push({ indexPath: layer.indexPath, field: layer.fills.includes(p) ? "fills" : "strokes" });
   }
   for (const [field, id] of Object.entries(layer.bound) as Array<[BindableField, string]>) {
     if (classifyBinding(id, isLive) !== "missing") continue;
     delete layer.bound[field];
-    if (field !== "fills" && field !== "strokes") count++;
+    if (field !== "fills" && field !== "strokes") {
+      count++;
+      found.push({ indexPath: layer.indexPath, field });
+    }
   }
   const textBound = layer.text?.bound ?? {};
   for (const [field, id] of Object.entries(textBound) as Array<[TypographyField, string]>) {
-    if (classifyBinding(id, isLive) === "missing") delete textBound[field];
+    if (classifyBinding(id, isLive) !== "missing") continue;
+    delete textBound[field];
+    found.push({ indexPath: layer.indexPath, field });
   }
-  for (const c of layer.children) count += stripMissingBindings(c, isLive);
+  for (const c of layer.children) count += stripMissingBindings(c, isLive, found);
   return count;
 }
 
@@ -422,7 +429,8 @@ export async function scanComponent(node: ScanRoot): Promise<ComponentScan> {
     const paintIndexes: PaintIndexes = new Map();
     const root = await buildLayer(comp, [], paintIndexes);
     const live = await liveVariableIds(boundIds(root));
-    const missingBindings = stripMissingBindings(root, (id) => live.has(id));
+    const missingUses: MissingBinding[] = [];
+    const missingBindings = stripMissingBindings(root, (id) => live.has(id), missingUses);
     variants.push({
       id: comp.id,
       props: comp.type === "COMPONENT" ? variantPropsOf(comp, isSet) : {},
@@ -430,6 +438,7 @@ export async function scanComponent(node: ScanRoot): Promise<ComponentScan> {
       uses: collectUses(comp.id, root, paintIndexes),
       boundUses: collectBoundUses(comp.id, root, paintIndexes),
       ...(missingBindings ? { missingBindings } : {}),
+      ...(missingUses.length ? { missingUses } : {}),
     });
   }
 
@@ -442,11 +451,11 @@ export async function scanComponent(node: ScanRoot): Promise<ComponentScan> {
   };
 }
 
-function isAlias(v: unknown): v is VariableAlias {
+export function isAlias(v: unknown): v is VariableAlias {
   return !!v && typeof v === "object" && (v as Bag).type === "VARIABLE_ALIAS";
 }
 
-function isRgb(v: unknown): v is RGB | RGBA {
+export function isRgb(v: unknown): v is RGB | RGBA {
   return !!v && typeof v === "object" && typeof (v as Bag).r === "number";
 }
 
@@ -454,9 +463,16 @@ function isCatalogType(t: string): t is CatalogVariable["type"] {
   return t === "COLOR" || t === "FLOAT" || t === "STRING" || t === "BOOLEAN";
 }
 
-export async function loadCatalog(): Promise<Catalog> {
-  const collections = await figma.variables.getLocalVariableCollectionsAsync();
-  const collectionCache = new Map<string, VariableCollection | null>(collections.map((c) => [c.id, c]));
+export interface VariableResolver {
+  getVariable(id: string): Promise<Variable | null>;
+  getCollection(id: string): Promise<VariableCollection | null>;
+  /** Follows aliases; an alias into another collection picks the mode with the same name, else that collection's default mode. */
+  resolve(variable: Variable, modeName: string, modeId: string): Promise<VariableValue | null>;
+}
+
+// Cached variable / collection lookups and the alias resolver shared by loadCatalog and studio_inspect_variables. Read only.
+export function createResolver(known: VariableCollection[] = []): VariableResolver {
+  const collectionCache = new Map<string, VariableCollection | null>(known.map((c) => [c.id, c]));
   const variableCache = new Map<string, Promise<Variable | null>>();
 
   const getVariable = (id: string) => {
@@ -474,7 +490,6 @@ export async function loadCatalog(): Promise<Catalog> {
     return collectionCache.get(id) ?? null;
   };
 
-  // An alias targets another collection; pick its mode with the same name, else its default mode.
   const resolve = async (variable: Variable, modeName: string, modeId: string): Promise<VariableValue | null> => {
     const seen = new Set<string>();
     let current: Variable | null = variable;
@@ -496,35 +511,58 @@ export async function loadCatalog(): Promise<Catalog> {
     return null;
   };
 
+  return { getVariable, getCollection, resolve };
+}
+
+// One catalog entry: values per mode of the variable's own collection, resolved through aliases; direct alias ids.
+export async function catalogVariable(
+  v: Variable,
+  col: VariableCollection,
+  resolve: VariableResolver["resolve"],
+  componentId = "",
+): Promise<CatalogVariable | null> {
+  if (!isCatalogType(v.resolvedType)) return null;
+  const values: CatalogVariable["values"] = {};
+  const aliasOf: Record<string, string> = {};
+  for (const mode of col.modes) {
+    const value = await resolve(v, mode.name, mode.modeId);
+    if (typeof value === "number") values[mode.name] = { number: value };
+    else if (typeof value === "string") values[mode.name] = { string: value };
+    else if (isRgb(value)) values[mode.name] = { hex: toHex(value), opacity: "a" in value ? value.a : 1 };
+    else values[mode.name] = {};
+    const raw = v.valuesByMode[mode.modeId];
+    if (isAlias(raw)) aliasOf[mode.name] = raw.id;
+  }
+  return {
+    id: v.id,
+    name: v.name,
+    collection: col.name,
+    type: v.resolvedType,
+    values,
+    ...(Object.keys(aliasOf).length ? { aliasOf } : {}),
+    ...(componentId ? { componentId } : {}),
+  };
+}
+
+// A name that already starts with its collection keeps it ("color/surface/accent/primary/enabled" in "color");
+// otherwise the collection is put in front ("surface/1/enabled" in "color" -> "color/surface/1/enabled").
+export function normalizeVariableName(name: string, collection: string): string {
+  const prefix = `${collection.trim().toLowerCase()}/`;
+  return name.toLowerCase().startsWith(prefix) ? name : `${prefix}${name}`;
+}
+
+export async function loadCatalog(): Promise<Catalog> {
+  const collections = await figma.variables.getLocalVariableCollectionsAsync();
+  const { getVariable, resolve } = createResolver(collections);
+
   const variables: CatalogVariable[] = [];
   const isComponents = (c: VariableCollection) => c.name.trim().toLowerCase() === "components";
   for (const col of collections) {
     const vars = await Promise.all(col.variableIds.map(getVariable));
     for (const v of vars) {
-      if (!v || !isCatalogType(v.resolvedType)) continue;
-      const values: CatalogVariable["values"] = {};
-      for (const mode of col.modes) {
-        const value = await resolve(v, mode.name, mode.modeId);
-        if (typeof value === "number") values[mode.name] = { number: value };
-        else if (typeof value === "string") values[mode.name] = { string: value };
-        else if (isRgb(value)) values[mode.name] = { hex: toHex(value), opacity: "a" in value ? value.a : 1 };
-        else values[mode.name] = {};
-      }
-      const aliasOf: Record<string, string> = {};
-      for (const mode of col.modes) {
-        const raw = v.valuesByMode[mode.modeId];
-        if (isAlias(raw)) aliasOf[mode.name] = raw.id;
-      }
-      const componentId = isComponents(col) ? v.getPluginData(COMPONENT_ID_KEY) : "";
-      variables.push({
-        id: v.id,
-        name: v.name,
-        collection: col.name,
-        type: v.resolvedType,
-        values,
-        ...(Object.keys(aliasOf).length ? { aliasOf } : {}),
-        ...(componentId ? { componentId } : {}),
-      });
+      if (!v) continue;
+      const entry = await catalogVariable(v, col, resolve, isComponents(col) ? v.getPluginData(COMPONENT_ID_KEY) : "");
+      if (entry) variables.push(entry);
     }
   }
 

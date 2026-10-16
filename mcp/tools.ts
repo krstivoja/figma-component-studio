@@ -38,6 +38,10 @@ export const proposeTokensShape = {
   suggestions: z.array(tokenSuggestionSchema),
 };
 
+export const inspectVariablesShape = {
+  scope: z.literal("selection").optional(),
+};
+
 export interface ToolDef {
   name: StudioToolName;
   description: string;
@@ -79,5 +83,17 @@ export const TOOLS: ToolDef[] = [
       "Propose a semantic variable (variableId) for raw values by their key from studio_get_tokens, with a reason. " +
       `Suggestions appear in the plugin's step-2 review with a Claude badge. ${SAFETY}`,
     shape: proposeTokensShape,
+  },
+  {
+    name: "studio_inspect_variables",
+    description:
+      "Debug variables in the open file, strictly read only (nothing is imported, set or created). Returns localCollections " +
+      "(id, name, modes, variableCount, hiddenFromPublishing); bound: every variable bound anywhere in the selected root " +
+      "(fills, strokes, effects, padding/gap/radius/size, typography, text segment fills), grouped by variable id with name, " +
+      "resolvedType, collection, remote, key, libraryCollection/libraryName for remote ones, resolved values per mode name, " +
+      "aliasOf per mode, missing for deleted variables, and usedBy {layerPath, field} (capped at 300 variables x 50 uses, see truncated); " +
+      "libraryCollections: library variable collections available to the file (name, libraryName, key, variableCount) or { error }. " +
+      `Works without a selection (root null). ${SAFETY}`,
+    shape: inspectVariablesShape,
   },
 ];

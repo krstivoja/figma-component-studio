@@ -83,11 +83,12 @@ describe("mcp/server.ts", () => {
     await main?.client.close();
   });
 
-  it("lists the five studio tools", async () => {
+  it("lists the six studio tools", async () => {
     const { tools } = await main.client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "studio_get_component",
       "studio_get_tokens",
+      "studio_inspect_variables",
       "studio_propose_names",
       "studio_propose_tokens",
       "studio_status",

@@ -257,10 +257,13 @@
     visit(root, root.name);
     return out;
   }
+  function isSlotName(name) {
+    return SLOT_NAME.test(name);
+  }
   function evaluate(node, ctx) {
     var _a;
     const current = node.name;
-    if (SLOT_NAME.test(current)) return null;
+    if (isSlotName(current)) return null;
     if (isUnnamed(node, ctx.rootName)) {
       const pick2 = (_a = parentRule(node, ctx)) != null ? _a : propose(node, ctx);
       return pick2 && pick2.name !== current ? rename(node, pick2) : null;
@@ -675,6 +678,9 @@
       { property: "paddingBottom", value: b, sides: ["bottom"] }
     ];
   }
+  function valueConflictWarning(name, values) {
+    return `Token name "${name}" maps to different values (${values.join(", ")}); rename one row before applying.`;
+  }
 
   // src/match.ts
   var GLOBAL = "_global";
@@ -825,6 +831,13 @@
       return a.variable.name < b.variable.name ? -1 : a.variable.name > b.variable.name ? 1 : 0;
     });
   }
+  function primitiveKey(name, collection) {
+    let n = name.trim().toLowerCase();
+    const own = `${collection.trim().toLowerCase()}/`;
+    if (n.startsWith(own)) n = n.slice(own.length);
+    if (n.startsWith("color/")) n = n.slice("color/".length);
+    return n.replace(/\s+/g, " ");
+  }
 
   // src/types.ts
   var TYPOGRAPHY_FIELDS = ["fontFamily", "fontStyle", "fontSize", "lineHeight", "letterSpacing"];
@@ -832,6 +845,7 @@
   var NAMING_KEY = "naming_proposal";
   var TOKENS_KEY = "token_proposal";
   var COMPONENT_ID_KEY = "componentId";
+  var RELAUNCH_CHECK_DESCRIPTION = "Lint names and tokens";
 
   // src/typography.ts
   var TOLERANCE = 0.01;
@@ -1062,7 +1076,17 @@
     return `cornerRadius${top ? "Top" : "Bottom"}${left ? "Left" : "Right"}`;
   }
   function displayNumber(n) {
-    return String(n);
+    return String(Math.round(n * 100) / 100);
+  }
+  function conflictValues(list) {
+    const numbers = /* @__PURE__ */ new Set();
+    const other = /* @__PURE__ */ new Set();
+    for (const i of list) {
+      if (i.use.kind === "number" && !i.bound && i.use.number !== null) numbers.add(Math.round(i.use.number * 100) / 100);
+      else other.add(i.display);
+    }
+    const out = [...[...numbers].sort((a, b) => a - b).map(String), ...[...other].sort()];
+    return out.length === 1 ? [`${out[0]} with sub-pixel differences`] : out;
   }
   function displayColor(hex, opacity) {
     const h = normalizeHex(hex);
@@ -1095,6 +1119,33 @@
   var TOKEN_RENAME_NOTE = "No visible change. Renaming tokens can break developers' code.";
   function countTokenRenames(scan, catalog, componentName, otherComponents = []) {
     return buildProposal(scan, catalog, [], componentName, [], otherComponents).tokens.filter((t) => t.kind === "rename").length;
+  }
+  function checkValues(scan, catalog) {
+    var _a, _b, _c, _d, _e, _f, _g;
+    const out = [];
+    for (const item of collectItems(scan, /* @__PURE__ */ new Map(), catalog, NO_OVERRIDES)) {
+      if (((_a = item.bound) == null ? void 0 : _a.collection) === "components") continue;
+      const res = resolve(item, isMobile(item) ? "mobile" : "desktop", catalog, tieContext([item]));
+      out.push({
+        use: item.use,
+        group: (_b = item.group) != null ? _b : null,
+        bound: (_c = item.bound) != null ? _c : null,
+        match: res.match,
+        target: res.target,
+        pairFix: (_d = res.pairFix) != null ? _d : null,
+        // Also without a fix in the catalog: a surface on text stays wrong even when there is nothing to suggest.
+        wrongFamily: !!res.wrongFamily || !!item.bound && boundOutsideFamily(item, item.bound),
+        pairNote: (_e = res.pairNote) != null ? _e : null,
+        pairExpected: (_f = res.pairExpected) != null ? _f : null,
+        note: res.note,
+        reason: res.reason,
+        suggestion: (_g = res.suggestion) != null ? _g : null
+      });
+    }
+    return out;
+  }
+  function boundOutsideFamily(item, bound) {
+    return item.use.kind === "color" && item.use.role !== "other" && bound.collection === "color" && !inRoleFamily(bound, item.use.role);
   }
   function foreignPrefixes(otherComponents, componentName) {
     var _a;
@@ -1169,10 +1220,7 @@
         groups.push({ name, items: list });
         continue;
       }
-      const values = [...new Set(list.map((i) => i.display))].sort();
-      warnings.push(
-        `Token name "${name}" maps to different values (${values.join(", ")}); rename one row before applying.`
-      );
+      warnings.push(valueConflictWarning(name, conflictValues(list)));
       const byValue = /* @__PURE__ */ new Map();
       for (const i of list) byValue.set(i.valueKey, [...(_b = byValue.get(i.valueKey)) != null ? _b : [], i]);
       for (const sub of byValue.values()) groups.push({ name, items: sub });
@@ -1233,7 +1281,7 @@
       }
       if (pairFix) notes.unshift(pairFix);
       else if (wrap) notes.unshift(`Bound directly to ${shortName((_k = (_j = dSample.bound) == null ? void 0 : _j.name) != null ? _k : replaces)}; wrapped in a component token, look unchanged.`);
-      const row = __spreadValues({
+      const row = __spreadValues(__spreadValues(__spreadValues({
         key,
         name: g.name,
         status: existing ? "existing" : "new",
@@ -1246,7 +1294,7 @@
         uses,
         note: notes.length ? notes.join(" ") : null,
         skip: false
-      }, wrap ? { kind: "wrap" } : {});
+      }, wrap ? { kind: "wrap" } : {}), pairFix ? { issue: "surface-pairing" } : {}), pairFix && (dRes.wrongFamily || mRes.wrongFamily) ? { wrongFamily: true } : {});
       results.set(g, row);
       if (retarget) retargets.push({ row, existing, sample: dSample });
     }
@@ -1314,22 +1362,23 @@
     const opacity = (_a = item.use.opacity) != null ? _a : 1;
     if (role === "text" || role === "icon") {
       const pair = surfacePair(item);
-      if (semantic.collection === "color" && allowedIn(semantic.name, pair)) return { role, pair, fix: null, same: true };
+      if (semantic.collection === "color" && allowedIn(semantic.name, pair)) return { role, pair, fix: null, same: true, fits: true };
       const hit2 = pairedText(pair, hex, opacity, role, catalog);
-      return { role, pair, fix: (_b = hit2 == null ? void 0 : hit2.variable) != null ? _b : null, same: !!(hit2 == null ? void 0 : hit2.exact) };
+      return { role, pair, fix: (_b = hit2 == null ? void 0 : hit2.variable) != null ? _b : null, same: !!(hit2 == null ? void 0 : hit2.exact), fits: false };
     }
-    if (inRoleFamily(semantic, role)) return { role, fix: null, same: true };
+    if (inRoleFamily(semantic, role)) return { role, fix: null, same: true, fits: true };
     const hit = familyMember(role, hex, opacity, catalog);
-    return { role, fix: (_c = hit == null ? void 0 : hit.variable) != null ? _c : null, same: !!(hit == null ? void 0 : hit.exact) };
+    return { role, fix: (_c = hit == null ? void 0 : hit.variable) != null ? _c : null, same: !!(hit == null ? void 0 : hit.exact), fits: false };
   }
   function whyInvalid(v, role, pair) {
     return pair && inRoleFamily(v, role) ? `which does not pair with ${pair.label}` : `which is not a ${role} color`;
   }
+  function pairSentence(role, name, pair) {
+    const where = pair.mappedFrom ? `${pair.label} (mapped from library ${shortName(pair.mappedFrom)})` : pair.closestTo ? `${pair.label} (closest to ${pair.closestTo})` : pair.label;
+    return `${role === "text" ? "Text" : "Icons"} on ${where} ${role === "text" ? "uses" : "use"} ${shortName(name)}`;
+  }
   function fixSentence(role, fix, same, pair) {
-    if (pair) {
-      const where = pair.closestTo ? `${pair.label} (closest to ${pair.closestTo})` : pair.label;
-      return `${role === "text" ? "Text" : "Icons"} on ${where} ${role === "text" ? "uses" : "use"} ${shortName(fix.name)}`;
-    }
+    if (pair) return pairSentence(role, fix.name, pair);
     return `${same ? "Same value as" : `Closest ${role} is`} ${shortName(fix.name)} (${lightText(fix)})`;
   }
   function fixGoal(c) {
@@ -1342,11 +1391,21 @@
     const check = familyCheck(item, bound, catalog);
     const exact = { match: "exact", candidates: [], note: null, reason: null };
     if (check == null ? void 0 : check.fix) {
-      return __spreadProps(__spreadValues({}, exact), {
+      return __spreadValues(__spreadProps(__spreadValues({}, exact), {
         alias: check.fix.id,
         target: check.fix,
         pairFix: `Bound directly to ${shortName(bound.name)}, ${whyInvalid(bound, check.role, check.pair)}. ${fixSentence(check.role, check.fix, check.same, check.pair)}; ${lookText(check.same)}.`,
-        fixLook: !check.same
+        fixLook: !check.same,
+        wrongFamily: !inRoleFamily(bound, check.role)
+      }), check.pair ? { pairNote: `${fixSentence(check.role, check.fix, check.same, check.pair)}; ${lookText(check.same)}.` } : {});
+    }
+    if (check && !check.fits && check.pair) {
+      return __spreadProps(__spreadValues({}, exact), {
+        alias: bound.id,
+        target: bound,
+        wrongFamily: !inRoleFamily(bound, check.role),
+        pairExpected: check.pair.defaultName,
+        pairNote: `${pairSentence(check.role, check.pair.defaultName, check.pair)}.`
       });
     }
     return __spreadProps(__spreadValues({}, exact), { alias: bound.id, target: bound });
@@ -1393,11 +1452,12 @@
         const changes = !!fix2 && !check.same;
         if (expected !== name && own && claimed.has(name)) {
           rows2.push(
-            ownRow(expected, token, sub, fixAlias, catalog, {
+            ownRow(expected, token, sub, fixAlias, catalog, __spreadProps(__spreadValues({
               manual: changes,
-              checked: true,
+              checked: true
+            }, fix2 ? { issue: "surface-pairing" } : {}), {
               note: fix2 ? `${layerList(sub)} uses ${token.name}, the name for the ${claimed.get(name)}; moves to its own token aliasing ${shortName(fix2.name)} ${fixGoal(check)}; ${lookText(!changes)}.` : `${layerList(sub)} uses ${token.name}, the name for the ${claimed.get(name)}; moves to its own token with the same alias, look unchanged.`
-            })
+            }))
           );
           moved.set(token.id, { items: [...(_e = (_d = moved.get(token.id)) == null ? void 0 : _d.items) != null ? _e : [], ...sub], to: expected });
           continue;
@@ -1407,6 +1467,7 @@
             ownRow(expected, token, sub, fixAlias, catalog, {
               manual: changes,
               checked: true,
+              issue: "surface-pairing",
               note: fix2 ? `${layerList(sub)} sits on ${check.pair.label}, unlike the other layers on ${token.name}; moves to its own token aliasing ${shortName(fix2.name)}; ${lookText(!changes)}.` : `${layerList(sub)} sits on another surface than the other layers on ${token.name}; moves to its own token with the same alias, look unchanged.`
             })
           );
@@ -1418,6 +1479,7 @@
             ownRow(expected, token, sub, now, catalog, {
               manual: false,
               checked: true,
+              issue: "property-split",
               note: `${layerList(sub)} ${fields} now ${lastSegment(expected)}; the other uses stay on ${token.name}. Own token with the same alias, look unchanged.`
             })
           );
@@ -1433,6 +1495,8 @@
             ownRow(expected, token, sub, fixAlias, catalog, {
               manual: changes,
               checked: true,
+              issue: "surface-pairing",
+              wrongFamily: !inRoleFamily(semantic, check.role),
               note: `${layerList(sub)} uses ${token.name} from another component, ${whyInvalid(semantic, check.role, check.pair)}. New own token aliasing ${shortName(fix2.name)} ${fixGoal(check)}; ${lookText(!changes)}.`
             })
           );
@@ -1463,6 +1527,7 @@
           ownRow(name2, token, g.map((x) => x.i), alias, catalog, {
             manual: changes,
             checked: true,
+            issue: "surface-pairing",
             note: `${layerList(g.map((x) => x.i))} sits on ${c2.pair.label}, unlike the other layers on ${token.name}; moves to its own token${c2.fix ? ` aliasing ${shortName(c2.fix.name)}; ${lookText(!changes)}.` : " with the same alias, look unchanged."}`
           })
         );
@@ -1472,7 +1537,7 @@
       const { i: sample, c } = fixes[0];
       const fix = c.fix;
       const where = c.pair ? `${sample.use.role === "text" ? "Text now sits" : "Icons now sit"} on ${c.pair.label}; restores the surface pairing and` : `${shortName(semantic.name)} is not a ${c.role} color; ${fixSentence(c.role, fix, c.same, void 0)};`;
-      rows2.push({
+      rows2.push(__spreadValues({
         key: `${name}|alias`,
         name,
         status: "existing",
@@ -1486,8 +1551,9 @@
         note: `${where} ${c.same ? "keeps the look" : "changes every use of this token"}.`,
         skip: false,
         kind: "alias-change",
-        previousAlias: now
-      });
+        previousAlias: now,
+        issue: "surface-pairing"
+      }, inRoleFamily(semantic, c.role) ? {} : { wrongFamily: true }));
     }
     return { rows: rows2, moved };
   }
@@ -1517,10 +1583,11 @@
     };
   }
   function ownRow(name, from, items, alias, catalog, opts) {
+    const issue = __spreadValues(__spreadValues({}, opts.issue ? { issue: opts.issue } : {}), opts.wrongFamily ? { wrongFamily: true } : {});
     const existing = catalog.variables.find((v) => v.collection === "components" && v.name === name);
     if ((existing == null ? void 0 : existing.aliasOf) && !sameAlias(currentAlias(existing), alias)) {
       const was = catalog.variables.find((v) => v.id === currentAlias(existing).desktop);
-      return {
+      return __spreadValues({
         key: `${name}|${from.name}`,
         name,
         status: "existing",
@@ -1535,9 +1602,9 @@
         skip: true,
         kind: "alias-change",
         previousAlias: currentAlias(existing)
-      };
+      }, issue);
     }
-    return {
+    return __spreadValues({
       key: `${name}|${from.name}`,
       name,
       status: existing ? "existing" : "new",
@@ -1551,7 +1618,7 @@
       note: opts.note,
       skip: opts.checked ? false : opts.manual,
       kind: "rebind"
-    };
+    }, issue);
   }
   function toAliasChange(row, existing, sample, via, moved, catalog) {
     const nameOf = (id) => {
@@ -1874,6 +1941,44 @@
   var INTENTS = ["dimmed", "brand", "dark brand", "success", "warning", "error"];
   var PAGE_INTENTS = ["brand", "dark brand", "success", "warning", "error", "disabled"];
   var INTENT_STATES = ["enabled", "hover", "pressed"];
+  function aliasKeyOf(v, mode, catalog) {
+    const keyed = v.aliasKeys ? findMode(Object.keys(v.aliasKeys), mode) : void 0;
+    if (keyed !== void 0) return v.aliasKeys[keyed];
+    const k = v.aliasOf ? findMode(Object.keys(v.aliasOf), mode) : void 0;
+    const target = k !== void 0 ? catalog.variables.find((x) => x.id === v.aliasOf[k]) : void 0;
+    return target ? primitiveKey(target.name, target.collection) : null;
+  }
+  function sameValue(a, b, mode) {
+    var _a, _b;
+    const x = resolveValue(a, mode, []);
+    const y = resolveValue(b, mode, []);
+    if (!(x == null ? void 0 : x.hex) || !(y == null ? void 0 : y.hex)) return false;
+    return normalizeHex(x.hex) === normalizeHex(y.hex) && Math.round(((_a = x.opacity) != null ? _a : 1) * 100) === Math.round(((_b = y.opacity) != null ? _b : 1) * 100);
+  }
+  var roleRoot = (name) => name.split("/").slice(0, 2).join("/");
+  function sharedSegments(a, b) {
+    const rest = (n) => n.split("/").slice(2);
+    const other = new Set(rest(b));
+    return rest(a).filter((s) => other.has(s)).length;
+  }
+  function localEquivalent(v, catalog) {
+    var _a, _b;
+    if (!v.remote || v.type !== "COLOR" || v.collection !== "color") return null;
+    const local = catalog.variables.filter((x) => !x.remote && x.type === "COLOR" && x.collection === "color");
+    const same = local.find((x) => x.name === v.name);
+    if (same) return same;
+    const modes = Object.keys(v.values);
+    if (!modes.length) return null;
+    const ranked = local.filter((x) => roleRoot(x.name) === roleRoot(v.name)).map((x, i) => {
+      const alias = modes.every((m) => {
+        const a = aliasKeyOf(v, m, catalog);
+        return a !== null && a === aliasKeyOf(x, m, catalog);
+      });
+      const value = alias || modes.every((m) => findMode(Object.keys(x.values), m) !== void 0 && sameValue(v, x, m));
+      return { x, i, alias, value, shared: sharedSegments(v.name, x.name) };
+    }).filter((c) => c.value).sort((a, b) => Number(b.alias) - Number(a.alias) || b.shared - a.shared || a.i - b.i);
+    return (_b = (_a = ranked[0]) == null ? void 0 : _a.x) != null ? _b : null;
+  }
   function allowedIn(name, pair) {
     return pair.defaults.includes(name) || pair.intents.includes(name);
   }
@@ -1938,6 +2043,12 @@
     var _a, _b;
     return (_b = (_a = item.surface) == null ? void 0 : _a.pair) != null ? _b : pairFor(null, null);
   }
+  function boundSurfacePair(surface, catalog) {
+    const local = surface.remote ? localEquivalent(surface, catalog) : null;
+    if (local && local.name !== surface.name && (local.name === PAGE || surfaceRest(local.name)))
+      return __spreadProps(__spreadValues({}, pairFor(local, null)), { mappedFrom: surface.name });
+    return pairFor(surface, null);
+  }
   function locateSurface(variant, path, catalog, overrides) {
     var _a, _b;
     const byId2 = (id) => id ? catalog.variables.find((v) => v.id === id) : void 0;
@@ -1947,10 +2058,10 @@
       const fill = node ? [...node.fills].reverse().find((f) => f.opacity > 0) : void 0;
       if (!fill) continue;
       const override = byId2((_a = overrides.layers.get(fillKey(variant.id, ownerPath))) != null ? _a : fill.boundVariableId ? overrides.tokens.get(fill.boundVariableId) : void 0);
-      if (override) return { pair: pairFor(override, null), ownerPath };
+      if (override) return { pair: boundSurfacePair(override, catalog), ownerPath };
       const boundVar = byId2((_b = fill.boundVariableId) != null ? _b : void 0);
       const bound = boundVar ? semanticOf(boundVar, catalog) : null;
-      if (bound && (bound.name === PAGE || surfaceRest(bound.name))) return { pair: pairFor(bound, null), ownerPath };
+      if (bound && (bound.name === PAGE || surfaceRest(bound.name))) return { pair: boundSurfacePair(bound, catalog), ownerPath };
       const best = preferEnabled(matchColor(fill.hex, fill.opacity, "background", catalog).filter((c) => c.variable.collection === "color"))[0];
       if (!best) return { pair: pairFor(null, null), ownerPath };
       return { pair: pairFor(best.variable, best.exact ? null : displayColor(fill.hex, fill.opacity)), ownerPath };
@@ -2391,24 +2502,30 @@
     for (const c of layer.children) boundIds(c, out);
     return out;
   }
-  function stripMissingBindings(layer, isLive2) {
+  function stripMissingBindings(layer, isLive2, found = []) {
     var _a, _b;
     let count = 0;
     for (const p of [...layer.fills, ...layer.strokes]) {
       if (classifyBinding(p.boundVariableId, isLive2) !== "missing") continue;
       p.boundVariableId = null;
       count++;
+      found.push({ indexPath: layer.indexPath, field: layer.fills.includes(p) ? "fills" : "strokes" });
     }
     for (const [field, id] of Object.entries(layer.bound)) {
       if (classifyBinding(id, isLive2) !== "missing") continue;
       delete layer.bound[field];
-      if (field !== "fills" && field !== "strokes") count++;
+      if (field !== "fills" && field !== "strokes") {
+        count++;
+        found.push({ indexPath: layer.indexPath, field });
+      }
     }
     const textBound = (_b = (_a = layer.text) == null ? void 0 : _a.bound) != null ? _b : {};
     for (const [field, id] of Object.entries(textBound)) {
-      if (classifyBinding(id, isLive2) === "missing") delete textBound[field];
+      if (classifyBinding(id, isLive2) !== "missing") continue;
+      delete textBound[field];
+      found.push({ indexPath: layer.indexPath, field });
     }
-    for (const c of layer.children) count += stripMissingBindings(c, isLive2);
+    for (const c of layer.children) count += stripMissingBindings(c, isLive2, found);
     return count;
   }
   async function liveVariableIds(ids) {
@@ -2428,14 +2545,15 @@
       const paintIndexes = /* @__PURE__ */ new Map();
       const root = await buildLayer(comp, [], paintIndexes);
       const live = await liveVariableIds(boundIds(root));
-      const missingBindings = stripMissingBindings(root, (id) => live.has(id));
-      variants.push(__spreadValues({
+      const missingUses = [];
+      const missingBindings = stripMissingBindings(root, (id) => live.has(id), missingUses);
+      variants.push(__spreadValues(__spreadValues({
         id: comp.id,
         props: comp.type === "COMPONENT" ? variantPropsOf(comp, isSet) : {},
         root,
         uses: collectUses(comp.id, root, paintIndexes),
         boundUses: collectBoundUses(comp.id, root, paintIndexes)
-      }, missingBindings ? { missingBindings } : {}));
+      }, missingBindings ? { missingBindings } : {}), missingUses.length ? { missingUses } : {}));
     }
     return {
       id: node.id,
@@ -2454,10 +2572,8 @@
   function isCatalogType(t) {
     return t === "COLOR" || t === "FLOAT" || t === "STRING" || t === "BOOLEAN";
   }
-  async function loadCatalog() {
-    var _a;
-    const collections = await figma.variables.getLocalVariableCollectionsAsync();
-    const collectionCache = new Map(collections.map((c) => [c.id, c]));
+  function createResolver(known = []) {
+    const collectionCache = new Map(known.map((c) => [c.id, c]));
     const variableCache = /* @__PURE__ */ new Map();
     const getVariable = (id) => {
       let p = variableCache.get(id);
@@ -2468,16 +2584,16 @@
       return p;
     };
     const getCollection = async (id) => {
-      var _a2;
+      var _a;
       if (!collectionCache.has(id)) {
         collectionCache.set(id, await figma.variables.getVariableCollectionByIdAsync(id).catch(() => null));
       }
-      return (_a2 = collectionCache.get(id)) != null ? _a2 : null;
+      return (_a = collectionCache.get(id)) != null ? _a : null;
     };
-    const resolve2 = async (variable, modeName, modeId2) => {
+    const resolve2 = async (variable, modeName, modeId) => {
       const seen = /* @__PURE__ */ new Set();
       let current = variable;
-      let currentModeId = modeId2;
+      let currentModeId = modeId;
       for (let depth = 0; current && depth < ALIAS_DEPTH_CAP; depth++) {
         if (seen.has(current.id)) return null;
         seen.add(current.id);
@@ -2494,33 +2610,45 @@
       }
       return null;
     };
+    return { getVariable, getCollection, resolve: resolve2 };
+  }
+  async function catalogVariable(v, col, resolve2, componentId = "") {
+    if (!isCatalogType(v.resolvedType)) return null;
+    const values = {};
+    const aliasOf = {};
+    for (const mode of col.modes) {
+      const value = await resolve2(v, mode.name, mode.modeId);
+      if (typeof value === "number") values[mode.name] = { number: value };
+      else if (typeof value === "string") values[mode.name] = { string: value };
+      else if (isRgb(value)) values[mode.name] = { hex: toHex(value), opacity: "a" in value ? value.a : 1 };
+      else values[mode.name] = {};
+      const raw = v.valuesByMode[mode.modeId];
+      if (isAlias(raw)) aliasOf[mode.name] = raw.id;
+    }
+    return __spreadValues(__spreadValues({
+      id: v.id,
+      name: v.name,
+      collection: col.name,
+      type: v.resolvedType,
+      values
+    }, Object.keys(aliasOf).length ? { aliasOf } : {}), componentId ? { componentId } : {});
+  }
+  function normalizeVariableName(name, collection) {
+    const prefix = `${collection.trim().toLowerCase()}/`;
+    return name.toLowerCase().startsWith(prefix) ? name : `${prefix}${name}`;
+  }
+  async function loadCatalog() {
+    var _a;
+    const collections = await figma.variables.getLocalVariableCollectionsAsync();
+    const { getVariable, resolve: resolve2 } = createResolver(collections);
     const variables = [];
     const isComponents = (c) => c.name.trim().toLowerCase() === "components";
     for (const col of collections) {
       const vars = await Promise.all(col.variableIds.map(getVariable));
       for (const v of vars) {
-        if (!v || !isCatalogType(v.resolvedType)) continue;
-        const values = {};
-        for (const mode of col.modes) {
-          const value = await resolve2(v, mode.name, mode.modeId);
-          if (typeof value === "number") values[mode.name] = { number: value };
-          else if (typeof value === "string") values[mode.name] = { string: value };
-          else if (isRgb(value)) values[mode.name] = { hex: toHex(value), opacity: "a" in value ? value.a : 1 };
-          else values[mode.name] = {};
-        }
-        const aliasOf = {};
-        for (const mode of col.modes) {
-          const raw = v.valuesByMode[mode.modeId];
-          if (isAlias(raw)) aliasOf[mode.name] = raw.id;
-        }
-        const componentId = isComponents(col) ? v.getPluginData(COMPONENT_ID_KEY) : "";
-        variables.push(__spreadValues(__spreadValues({
-          id: v.id,
-          name: v.name,
-          collection: col.name,
-          type: v.resolvedType,
-          values
-        }, Object.keys(aliasOf).length ? { aliasOf } : {}), componentId ? { componentId } : {}));
+        if (!v) continue;
+        const entry = await catalogVariable(v, col, resolve2, isComponents(col) ? v.getPluginData(COMPONENT_ID_KEY) : "");
+        if (entry) variables.push(entry);
       }
     }
     const components = (_a = collections.find(isComponents)) != null ? _a : null;
@@ -3019,158 +3147,9 @@
     const intended = !!applied && (applied.tokens.some((t) => t.match === "manual" && !t.skip) || ((_a = applied.typography) != null ? _a : []).some((t) => t.match === "manual" && !t.skip));
     return { kind: intended ? "intended" : "loud", lines: result.snapshotDiff.slice() };
   }
-
-  // src/snapshot.ts
-  var KEYS = [
-    "width",
-    "height",
-    "paddingLeft",
-    "paddingRight",
-    "paddingTop",
-    "paddingBottom",
-    "itemSpacing",
-    "topLeftRadius",
-    "topRightRadius",
-    "bottomLeftRadius",
-    "bottomRightRadius",
-    "strokeWeight",
-    "fontSize"
-  ];
-  var PAD = ["paddingLeft", "paddingRight", "paddingTop", "paddingBottom"];
-  var RAD = ["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"];
-  var TXT = ["fontFamily", "fontStyle", "fontSize", "lineHeight", "letterSpacing"];
-  var round = (x) => Math.round(x * 100) / 100;
-  function paints(value) {
-    if (!Array.isArray(value)) return void 0;
-    return value.filter((p) => p.visible !== false && p.type === "SOLID").map((p) => toHex(p.color) + (p.opacity !== void 0 && p.opacity < 1 ? "@" + round(p.opacity) : ""));
-  }
-  async function rootNode(rootId) {
-    const node = await figma.getNodeByIdAsync(rootId);
-    if (!node || node.type === "DOCUMENT" || node.type === "PAGE") throw new Error(`Node ${rootId} not found`);
-    return node;
-  }
-  async function takeSnapshot(rootId) {
-    const root = await rootNode(rootId);
-    const out = {};
-    const walk = (n, path) => {
-      const p = path ? path + " > " + n.name : n.name;
-      const bag = n;
-      const s = {};
-      for (const k of KEYS) {
-        const v = bag[k];
-        if (typeof v === "number") s[k] = round(v);
-      }
-      s.fills = paints(bag.fills);
-      s.strokes = paints(bag.strokes);
-      if (n.type === "TEXT") {
-        const style = textStyleOf(n);
-        s.font = style ? `${style.fontFamily} ${style.fontStyle}` : "mixed";
-        if (style) {
-          const px2 = (m) => round(m.unit === "PERCENT" ? m.value * style.fontSize / 100 : m.value);
-          s.lineHeight = style.lineHeight.unit === "AUTO" ? "auto" : px2(style.lineHeight);
-          s.letterSpacing = px2(style.letterSpacing);
-        }
-      }
-      out[n.id + " " + p] = s;
-      if ("children" in n && n.type !== "INSTANCE") for (const c of n.children) walk(c, p);
-    };
-    walk(root, "");
-    return out;
-  }
-  function byId(snap) {
-    const map = /* @__PURE__ */ new Map();
-    for (const [key, fields] of Object.entries(snap)) {
-      const sp = key.indexOf(" ");
-      const id = sp < 0 ? key : key.slice(0, sp);
-      map.set(id, { path: sp < 0 ? "" : key.slice(sp + 1), fields });
-    }
-    return map;
-  }
-  var show2 = (v) => v === void 0 ? "none" : Array.isArray(v) ? `[${v.join(", ")}]` : String(v);
-  function diffSnapshots(before, after) {
-    const a = byId(before);
-    const b = byId(after);
-    const lines = [];
-    for (const [id, prev] of a) {
-      const next = b.get(id);
-      if (!next) {
-        lines.push(`${prev.path}: layer removed`);
-        continue;
-      }
-      const fields = /* @__PURE__ */ new Set([...Object.keys(prev.fields), ...Object.keys(next.fields)]);
-      for (const f of fields) {
-        const x = prev.fields[f];
-        const y = next.fields[f];
-        if (JSON.stringify(x) !== JSON.stringify(y)) lines.push(`${next.path} \u203A ${f}: ${show2(x)} -> ${show2(y)}`);
-      }
-    }
-    for (const [id, next] of b) if (!a.has(id)) lines.push(`${next.path}: layer added`);
-    return lines;
-  }
-  async function auditComponent(rootId) {
-    const root = await rootNode(rootId);
-    const cols = await figma.variables.getLocalVariableCollectionsAsync();
-    const colName = new Map(cols.map((c) => [c.id, c.name]));
-    const varCache = /* @__PURE__ */ new Map();
-    const getVar = (id) => {
-      let p = varCache.get(id);
-      if (!p) {
-        p = getLiveVariable(id);
-        varCache.set(id, p);
-      }
-      return p;
-    };
-    const issues = [];
-    const check = async (n, field, alias, want) => {
-      var _a;
-      const id = alias && typeof alias === "object" ? alias.id : void 0;
-      if (typeof id !== "string") {
-        issues.push(`${n.name} \u203A ${field}: raw value`);
-        return;
-      }
-      const v = await getVar(id);
-      if (!v) {
-        issues.push(`${n.name} \u203A ${field}: bound to a deleted variable (raw value)`);
-        return;
-      }
-      const col = (_a = colName.get(v.variableCollectionId)) != null ? _a : "library";
-      if (col !== want) issues.push(`${n.name} \u203A ${field}: bound to ${col}/${v.name}, should be ${want}`);
-    };
-    const walk = async (n) => {
-      var _a, _b;
-      if (n.type !== "COMPONENT_SET") {
-        const bag = n;
-        const b = "boundVariables" in n && n.boundVariables || {};
-        const auto = typeof bag.layoutMode === "string" && bag.layoutMode !== "NONE";
-        const pos = (k) => typeof bag[k] === "number" && bag[k] > 0;
-        if (auto) {
-          for (const k of PAD) if (pos(k)) await check(n, k, b[k], "components");
-        }
-        if (auto && pos("itemSpacing") && bag.primaryAxisAlignItems !== "SPACE_BETWEEN")
-          await check(n, "itemSpacing", b.itemSpacing, "components");
-        for (const k of RAD) if (pos(k)) await check(n, k, b[k], "components");
-        const strokes = bag.strokes;
-        const hasStroke = Array.isArray(strokes) && strokes.some((s) => s.visible !== false);
-        if (hasStroke && pos("strokeWeight")) await check(n, "strokeWeight", b.strokeWeight, "components");
-        for (const key of ["fills", "strokes"]) {
-          const list = bag[key];
-          if (!Array.isArray(list)) continue;
-          for (const p of list) {
-            if (p.visible !== false && p.type === "SOLID") await check(n, key, (_a = p.boundVariables) == null ? void 0 : _a.color, "components");
-          }
-        }
-        if (n.type === "TEXT") {
-          for (const k of TXT) {
-            const a = b[k];
-            if (k === "lineHeight" && !(Array.isArray(a) ? a[0] : a) && ((_b = bag.lineHeight) == null ? void 0 : _b.unit) === "AUTO") continue;
-            await check(n, k, Array.isArray(a) ? a[0] : a, "typography");
-          }
-        }
-      }
-      if ("children" in n && n.type !== "INSTANCE") for (const c of n.children) await walk(c);
-    };
-    await walk(root);
-    return issues.length ? issues : "PASS";
+  function splitRawDisplay(display) {
+    const m = /^(.*) \(([^()]*)\)$/.exec(display);
+    return m ? { value: m[2], token: m[1] } : null;
   }
 
   // src/storedProposal.ts
@@ -3393,26 +3372,22 @@
   var MAX_TEXT = 80;
   var MAX_IMAGE_SIDE = 1600;
   var SELECTION_CHANGED = "The selection changed; ask again after selecting the component.";
-  function isTopLevel(node) {
-    var _a, _b;
-    return ((_a = node.parent) == null ? void 0 : _a.type) === "PAGE" || ((_b = node.parent) == null ? void 0 : _b.type) === "SECTION";
-  }
   function selectedRoot() {
     var _a;
     const selection = figma.currentPage.selection;
     if (selection.length !== 1) {
-      throw new Error("Select one component, component set or top-level frame (or any layer inside it).");
+      throw new Error("Select one component, component set or frame (or any layer inside it).");
     }
     let node = selection[0];
-    let topFrame = null;
+    let nearestFrame = null;
     while (node && node.type !== "PAGE" && node.type !== "DOCUMENT") {
       if (node.type === "COMPONENT_SET") return node;
       if (node.type === "COMPONENT") return ((_a = node.parent) == null ? void 0 : _a.type) === "COMPONENT_SET" ? node.parent : node;
-      if (node.type === "FRAME" && isTopLevel(node)) topFrame = node;
+      if (node.type === "FRAME" && !nearestFrame) nearestFrame = node;
       node = node.parent;
     }
-    if (topFrame) return topFrame;
-    throw new Error("The selection is not inside a component or a top-level frame.");
+    if (nearestFrame) return nearestFrame;
+    throw new Error("The selection is not inside a component or a frame.");
   }
   function referenceVariant(root) {
     if (root.type !== "COMPONENT_SET") return root;
@@ -3436,37 +3411,42 @@
     const scan = await scanComponent(node);
     return countTokenRenames(scan, await loadCatalog(), (_a = normalizeComponentName(scan.name)) != null ? _a : scan.name, await otherComponentNames(node));
   }
-  async function scanForTokens(node, catalog, assume = []) {
-    const scan = await scanComponent(node);
-    const normalized = normalizeComponentName(scan.name);
-    const proposal = buildProposal(scan, catalog, [], normalized != null ? normalized : scan.name, assume, await otherComponentNames(node));
-    const warnings = [...proposal.warnings];
+  async function scanForTokens(node, catalog, assume = [], scanned) {
+    const { proposal, stepHints, setup } = await tokenScan(node, catalog, assume, scanned);
+    return __spreadProps(__spreadValues({}, proposal), { warnings: [...setup, ...stepHints, ...proposal.warnings] });
+  }
+  async function tokenScan(node, catalog, assume = [], scanned) {
+    const scan = scanned != null ? scanned : await scanComponent(node);
+    const normalized2 = normalizeComponentName(scan.name);
+    const proposal = buildProposal(scan, catalog, [], normalized2 != null ? normalized2 : scan.name, assume, await otherComponentNames(node));
+    const stepHints = [];
+    const setup = [];
     const pendingRenames = proposeLayerNames(scan.variants[0].root).filter((r) => !r.skip).length;
     if (pendingRenames > 0) {
-      warnings.unshift(
-        `${pendingRenames} layer${pendingRenames === 1 ? "" : "s"} still need a better name. Run "1. Rename layers" first, token names are built from layer names.`
+      stepHints.push(
+        `${pendingRenames} layer${pendingRenames === 1 ? "" : "s"} still need a better name. Run "Rename layers" first, token names are built from layer names.`
       );
     }
-    if (normalized !== null) {
-      warnings.unshift(`Component name "${scan.name}" does not follow the convention; tokens use "${normalized}". Rename it in step 1.`);
+    if (normalized2 !== null) {
+      stepHints.unshift(`Component name "${scan.name}" does not follow the convention; tokens use "${normalized2}". Rename it in step 1.`);
     }
     if (catalog.componentsCollectionId === null) {
-      warnings.unshift('No "components" variable collection in this file. Tokens cannot be created until it exists.');
+      setup.push('No "components" variable collection in this file. Tokens cannot be created until it exists.');
     }
-    return __spreadProps(__spreadValues({}, proposal), { newComponentName: null, renames: [], warnings });
+    return { proposal: __spreadProps(__spreadValues({}, proposal), { newComponentName: null, renames: [] }), stepHints, setup };
   }
   function nameClass(layer, rootName) {
     if (isUnnamed(layer, rootName)) return "unnamed";
     const name = layer.name.trim();
     return vocabularyEntry(name) || vocabularyEntry(name.toLowerCase()) ? "vocabulary" : "deliberate";
   }
-  function round2(n) {
+  function round(n) {
     return Math.round(n * 100) / 100;
   }
   function layoutText(l) {
     if (l.mode === "NONE") return void 0;
-    const pad = [l.paddingTop, l.paddingRight, l.paddingBottom, l.paddingLeft].map(round2).join("/");
-    const gap = l.spaceBetween ? "space-between" : `gap ${round2(l.itemSpacing)}`;
+    const pad = [l.paddingTop, l.paddingRight, l.paddingBottom, l.paddingLeft].map(round).join("/");
+    const gap = l.spaceBetween ? "space-between" : `gap ${round(l.itemSpacing)}`;
     return `${l.mode}${l.wrap ? " wrap" : ""} ${gap} pad ${pad} w:${l.widthSizing} h:${l.heightSizing}`;
   }
   function hexWithAlpha(hex, opacity) {
@@ -3485,7 +3465,7 @@
         type: (_a = rawType(n.id)) != null ? _a : n.kind,
         name: n.name,
         visible: n.visible,
-        size: [round2(n.width), round2(n.height)]
+        size: [round(n.width), round(n.height)]
       };
       const layout = layoutText(n.layout);
       if (layout) row.layout = layout;
@@ -3754,6 +3734,215 @@
     }
     return { stored: suggestions.length, rejected };
   }
+  var INSPECT_MAX_VARIABLES = 300;
+  var INSPECT_MAX_USED_BY = 50;
+  var INSPECT_MAX_LIBRARY_COLLECTIONS = 100;
+  var PATH_SEPARATOR = " \u203A ";
+  function aliasIdsIn(value, field, out) {
+    if (Array.isArray(value)) {
+      value.forEach((v, i) => aliasIdsIn(v, value.length === 1 ? field : `${field}[${i}]`, out));
+    } else if (isAlias(value)) {
+      out.push({ field, id: value.id });
+    } else if (value && typeof value === "object") {
+      for (const [k, v] of Object.entries(value)) aliasIdsIn(v, `${field}.${k}`, out);
+    }
+  }
+  function paintAliases(paints2, field, out) {
+    if (!Array.isArray(paints2)) return;
+    paints2.forEach((p, i) => {
+      const bv = p == null ? void 0 : p.boundVariables;
+      if (bv && typeof bv === "object") aliasIdsIn(bv, `${field}[${i}]`, out);
+    });
+  }
+  function nodeBindings(node) {
+    var _a;
+    const out = [];
+    const bag = node;
+    const bound = "boundVariables" in node ? node.boundVariables : void 0;
+    for (const [field, value] of Object.entries(bound != null ? bound : {})) {
+      if (field === "fills" || field === "strokes" || field === "effects") continue;
+      aliasIdsIn(value, field, out);
+    }
+    paintAliases(bag.fills, "fills", out);
+    paintAliases(bag.strokes, "strokes", out);
+    paintAliases(bag.effects, "effects", out);
+    if (node.type === "TEXT" && typeof node.getStyledTextSegments === "function") {
+      const mixedFills = node.fills === figma.mixed;
+      let segments = [];
+      try {
+        segments = node.getStyledTextSegments(["fills", "boundVariables"]);
+      } catch (e) {
+        segments = [];
+      }
+      const nodeLevel = new Set(Object.keys(bound != null ? bound : {}));
+      for (const seg of Array.isArray(segments) ? segments : []) {
+        const range = `text[${String(seg.start)}-${String(seg.end)}]`;
+        if (mixedFills) paintAliases(seg.fills, `${range}.fills`, out);
+        for (const [field, value] of Object.entries((_a = seg.boundVariables) != null ? _a : {})) {
+          if (!nodeLevel.has(field)) aliasIdsIn(value, `${range}.${field}`, out);
+        }
+      }
+    }
+    return out;
+  }
+  function inspectValue(value) {
+    if (value === null || value === void 0) return null;
+    if (typeof value === "number" || typeof value === "string" || typeof value === "boolean") return value;
+    if (isRgb(value)) return hexWithAlpha(toHex(value), "a" in value ? value.a : 1);
+    return null;
+  }
+  async function describeVariable(id, resolver) {
+    var _a, _b, _c, _d;
+    const v = await resolver.getVariable(id);
+    if (!v) return { id, name: null, resolvedType: null, collection: null, remote: false, key: null, missing: true, values: {} };
+    const col = await resolver.getCollection(v.variableCollectionId);
+    const info = {
+      id,
+      name: v.name,
+      resolvedType: v.resolvedType,
+      collection: { id: v.variableCollectionId, name: (_a = col == null ? void 0 : col.name) != null ? _a : null },
+      remote: v.remote === true,
+      key: typeof v.key === "string" ? v.key : null,
+      values: {}
+    };
+    if (!v.remote && col && !col.variableIds.includes(v.id)) info.missing = true;
+    const aliasOf = {};
+    for (const mode of (_b = col == null ? void 0 : col.modes) != null ? _b : []) {
+      info.values[mode.name] = inspectValue(await resolver.resolve(v, mode.name, mode.modeId));
+      const raw = v.valuesByMode[mode.modeId];
+      if (isAlias(raw)) aliasOf[mode.name] = (_d = (_c = await resolver.getVariable(raw.id)) == null ? void 0 : _c.name) != null ? _d : raw.id;
+    }
+    if (Object.keys(aliasOf).length) info.aliasOf = aliasOf;
+    return info;
+  }
+  async function collectBoundVariables(root, resolver) {
+    const uses = /* @__PURE__ */ new Map();
+    const overflow = /* @__PURE__ */ new Set();
+    let truncated = false;
+    const walk = (node, path) => {
+      const seen = /* @__PURE__ */ new Set();
+      for (const { field, id } of nodeBindings(node)) {
+        const k = `${id}|${field}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        let list = uses.get(id);
+        if (!list) {
+          if (uses.size >= INSPECT_MAX_VARIABLES) {
+            truncated = true;
+            continue;
+          }
+          list = [];
+          uses.set(id, list);
+        }
+        if (list.length >= INSPECT_MAX_USED_BY) {
+          overflow.add(id);
+          truncated = true;
+          continue;
+        }
+        list.push({ layerPath: path, field });
+      }
+      if ("children" in node) for (const c of node.children) walk(c, `${path}${PATH_SEPARATOR}${c.name}`);
+    };
+    walk(root, root.name);
+    const variables = [];
+    for (const [id, usedBy] of uses) {
+      const info = await describeVariable(id, resolver);
+      variables.push(__spreadValues(__spreadProps(__spreadValues({}, info), { usedBy }), overflow.has(id) ? { usedByTruncated: true } : {}));
+    }
+    return { variables, truncated };
+  }
+  var NORMALISED_COLLECTION = "color";
+  function normalized(v) {
+    if (v.collection.trim().toLowerCase() !== NORMALISED_COLLECTION) return v;
+    const name = normalizeVariableName(v.name, NORMALISED_COLLECTION);
+    return name === v.name ? v : __spreadProps(__spreadValues({}, v), { name });
+  }
+  function equivalenceKey(v) {
+    return `${v.collection.trim().toLowerCase()}|${normalizeVariableName(v.name, v.collection)}`;
+  }
+  async function withBoundVariables(catalog, root) {
+    var _a;
+    const local = await figma.variables.getLocalVariableCollectionsAsync();
+    const resolver = createResolver(local);
+    const { variables: bound } = await collectBoundVariables(root, resolver);
+    const known = new Set(catalog.variables.map((v) => v.id));
+    const added = [];
+    for (const info of bound) {
+      if (info.missing || !info.remote || known.has(info.id)) continue;
+      const v = await resolver.getVariable(info.id);
+      const col = v ? await resolver.getCollection(v.variableCollectionId) : null;
+      const entry = v && col ? await catalogVariable(v, col, resolver.resolve) : null;
+      if (!entry) continue;
+      const aliasKeys = {};
+      for (const [mode, id] of Object.entries((_a = entry.aliasOf) != null ? _a : {})) {
+        const target = await resolver.getVariable(id);
+        const tcol = target ? await resolver.getCollection(target.variableCollectionId) : null;
+        if (target && tcol) aliasKeys[mode] = primitiveKey(target.name, tcol.name);
+      }
+      added.push(__spreadValues(__spreadProps(__spreadValues({}, entry), { remote: true }), Object.keys(aliasKeys).length ? { aliasKeys } : {}));
+    }
+    return __spreadProps(__spreadValues({}, catalog), { variables: [...catalog.variables, ...added].map(normalized) });
+  }
+  async function libraryCollections() {
+    try {
+      const available = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+      const list = available.slice(0, INSPECT_MAX_LIBRARY_COLLECTIONS);
+      const collections = await Promise.all(
+        list.map(async (c) => {
+          const row = { name: c.name, libraryName: c.libraryName, key: c.key };
+          try {
+            const vars = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(c.key);
+            return __spreadProps(__spreadValues({}, row), { variableCount: vars.length });
+          } catch (e) {
+            return __spreadProps(__spreadValues({}, row), { variableCount: null, error: errorText2(e) });
+          }
+        })
+      );
+      return { collections, truncated: available.length > list.length };
+    } catch (e) {
+      return { error: `Library collections are not available: ${errorText2(e)}` };
+    }
+  }
+  async function inspectVariables() {
+    var _a, _b;
+    const local = await figma.variables.getLocalVariableCollectionsAsync();
+    const resolver = createResolver(local);
+    const localCollections = local.map((c) => ({
+      id: c.id,
+      name: c.name,
+      modes: c.modes.map((m) => m.name),
+      variableCount: c.variableIds.length,
+      hiddenFromPublishing: c.hiddenFromPublishing === true
+    }));
+    const libraries = await libraryCollections();
+    let root = null;
+    let selectionError;
+    try {
+      root = selectedRoot();
+    } catch (e) {
+      selectionError = errorText2(e);
+    }
+    let bound = [];
+    let truncated = false;
+    if (root) {
+      ({ variables: bound, truncated } = await collectBoundVariables(root, resolver));
+      const libraryByKey = new Map("collections" in libraries ? libraries.collections.map((c) => [c.key, c.libraryName]) : []);
+      for (const v of bound) {
+        if (!v.remote || !v.collection) continue;
+        const col = await resolver.getCollection(v.collection.id);
+        v.libraryCollection = (_a = col == null ? void 0 : col.name) != null ? _a : null;
+        v.libraryName = (_b = col && libraryByKey.get(col.key)) != null ? _b : null;
+      }
+    }
+    return __spreadProps(__spreadValues({
+      root: root ? { id: root.id, name: root.name, type: root.type } : null
+    }, selectionError ? { selectionError } : {}), {
+      localCollections,
+      bound,
+      truncated,
+      libraryCollections: libraries
+    });
+  }
   function errorText2(e) {
     return e instanceof Error ? e.message : String(e);
   }
@@ -3772,12 +3961,722 @@
           return { id, ok: true, result: await proposeNames(args) };
         case "studio_propose_tokens":
           return { id, ok: true, result: await proposeTokens(args) };
+        case "studio_inspect_variables":
+          return { id, ok: true, result: await inspectVariables() };
         default:
           return { id, ok: false, error: `Unknown tool ${String(req.tool)}.` };
       }
     } catch (e) {
       return { id, ok: false, error: errorText2(e) };
     }
+  }
+
+  // src/qa.ts
+  var DRAFT_NAMING = /* @__PURE__ */ new Set(["default-name", "content-name", "keyboard-mash", "synonym"]);
+  var SEVERITY = {
+    "component-name": "warning",
+    "default-name": "warning",
+    "content-name": "warning",
+    "keyboard-mash": "warning",
+    synonym: "info",
+    "naming-convention": "info",
+    "not-in-vocabulary": "info",
+    "raw-value": "warning",
+    "deleted-binding": "error",
+    "semantic-binding": "warning",
+    "surface-pairing": "error",
+    "role-family": "error",
+    "stale-token-name": "info",
+    "property-split": "info",
+    "token-mismatch": "warning",
+    "unbound-typography": "warning",
+    "library-token": "info"
+  };
+  var ISSUE = {
+    "component-name": "Component name off convention",
+    "default-name": "Default Figma name",
+    "content-name": "Named after its text",
+    "keyboard-mash": "Keyboard mash",
+    synonym: "Synonym of a vocabulary name",
+    "naming-convention": "Name off convention",
+    "not-in-vocabulary": "Not in the vocabulary",
+    "raw-value": "Raw value, no token",
+    "deleted-binding": "Bound to a deleted variable",
+    "semantic-binding": "Bound to a semantic token directly",
+    "surface-pairing": "Wrong surface pairing",
+    "role-family": "Wrong color family",
+    "stale-token-name": "Token name no longer matches",
+    "property-split": "Token should be split",
+    "token-mismatch": "Token named for another layer",
+    "unbound-typography": "Unbound typography",
+    "library-token": "From a library"
+  };
+  var NEAREST_ISSUE = "Raw value, nearest token";
+  var EXACT_ISSUE = "Raw value, token exists";
+  var LIBRARY_NOTE = "From the library, not in this file";
+  var LOCAL_NOTE = "Local equivalent";
+  var SEVERITY_RANK = {
+    error: 0,
+    warning: 1,
+    info: 2
+  };
+  var SEP = " \u203A ";
+  var pathKey2 = (p) => p.join(".");
+  var useKey = (variantId, indexPath, field) => `${variantId}|${pathKey2(indexPath)}|${field}`;
+  function locator(scan) {
+    const roots = new Map(scan.variants.map((v) => [v.id, v.root]));
+    return (variantId, indexPath) => {
+      const root = roots.get(variantId);
+      if (!root) return null;
+      const names = [root.name];
+      let n = root;
+      for (const i of indexPath) {
+        const next = n.children[i];
+        if (!next) return null;
+        n = next;
+        names.push(n.name);
+      }
+      return { id: n.id, path: names.join(SEP) };
+    };
+  }
+  function finding(kind, d) {
+    var _a, _b;
+    return __spreadProps(__spreadValues({}, d), {
+      kind,
+      severity: (_a = d.severity) != null ? _a : SEVERITY[kind],
+      issue: (_b = d.issue) != null ? _b : ISSUE[kind]
+    });
+  }
+  function nameKind(layer, rootName, rename2) {
+    const name = layer.name.trim();
+    if (name === "" || isDefaultFigmaName(name) || name === rootName) return "default-name";
+    if (looksLikeRandomTyping(name)) return "keyboard-mash";
+    if (layer.text !== null && layer.text.characters.trim().startsWith(name)) return "content-name";
+    if (synonymOf(layer.name)) return "synonym";
+    if (rename2) return "naming-convention";
+    if (!isSlotName(layer.name) && nameClass(layer, rootName) === "deliberate") return "not-in-vocabulary";
+    return null;
+  }
+  function namingFindings(input, locate2, draft = false) {
+    var _a;
+    const { scan, naming, namingSource } = input;
+    const out = [];
+    const nameSource = namingSource.source === "claude" ? "claude" : "rules";
+    if (!draft && naming.newComponentName !== null && naming.newComponentName !== scan.name) {
+      out.push(
+        finding("component-name", {
+          area: "naming",
+          layer: scan.name,
+          nodeIds: [scan.id],
+          current: scan.name,
+          currentColor: null,
+          suggestion: naming.newComponentName,
+          suggestionColor: null,
+          source: nameSource,
+          detail: null
+        })
+      );
+    }
+    const variant = scan.variants[0];
+    const reference = variant.root;
+    const renames = new Map(naming.renames.map((r) => [pathKey2(r.indexPath), r]));
+    const seen = /* @__PURE__ */ new Set();
+    const add = (layer, kind, rename2) => {
+      var _a2, _b, _c;
+      const where = locate2(variant.id, layer.indexPath);
+      const reason = rename2 ? rename2.reason + (rename2.outsideVocabulary ? " (outside the vocabulary)" : "") : null;
+      out.push(
+        finding(kind, {
+          area: "naming",
+          layer: (_a2 = where == null ? void 0 : where.path) != null ? _a2 : layer.name,
+          nodeIds: [layer.id],
+          current: layer.name,
+          currentColor: null,
+          suggestion: (_b = rename2 == null ? void 0 : rename2.newName) != null ? _b : null,
+          suggestionColor: null,
+          source: (_c = rename2 == null ? void 0 : rename2.source) != null ? _c : null,
+          detail: reason || null
+        })
+      );
+    };
+    const walk = (parent) => {
+      for (const layer of parent.children) {
+        if (!layer.visible) continue;
+        const key = pathKey2(layer.indexPath);
+        seen.add(key);
+        const rename2 = renames.get(key);
+        const kind = nameKind(layer, reference.name, rename2);
+        if (kind) add(layer, kind, rename2);
+        if (layer.kind !== "INSTANCE" && !isIconGlyph(layer)) walk(layer);
+      }
+    };
+    walk(reference);
+    for (const r of naming.renames) {
+      if (seen.has(pathKey2(r.indexPath))) continue;
+      const layer = layerAtPath(reference, r.indexPath);
+      if (layer) add(layer, (_a = nameKind(layer, reference.name, r)) != null ? _a : "naming-convention", r);
+    }
+    return draft ? out.filter((f) => DRAFT_NAMING.has(f.kind)) : out;
+  }
+  function colorOf(uses) {
+    var _a;
+    const u = uses.find((x) => x.kind === "color" && x.hex);
+    return u ? { hex: u.hex, opacity: (_a = u.opacity) != null ? _a : 1 } : null;
+  }
+  function tokenFindings(input, locate2) {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i;
+    const { scan, tokens, semantic } = input;
+    const byId2 = new Map(semantic.map((s) => [s.id, s]));
+    const nameOf = (id) => {
+      var _a2, _b2;
+      return id ? (_b2 = (_a2 = byId2.get(id)) == null ? void 0 : _a2.name) != null ? _b2 : id : "none";
+    };
+    const colorById = (id) => {
+      var _a2;
+      const light = id ? (_a2 = byId2.get(id)) == null ? void 0 : _a2.light : void 0;
+      return light ? { hex: light.hex, opacity: light.opacity } : null;
+    };
+    const missing = new Set(scan.variants.flatMap((v) => {
+      var _a2;
+      return ((_a2 = v.missingUses) != null ? _a2 : []).map((m) => useKey(v.id, m.indexPath, m.field));
+    }));
+    const isMissing = (u) => missing.has(useKey(u.variantId, u.indexPath, u.field));
+    const layersOf = layerLister(scan, locate2);
+    const aliasText = (t) => t.alias.desktop === t.alias.mobile ? nameOf(t.alias.desktop) : `${nameOf(t.alias.desktop)} (desktop) / ${nameOf(t.alias.mobile)} (mobile)`;
+    const out = [];
+    const fixFor = /* @__PURE__ */ new Map();
+    const expectedPair = /* @__PURE__ */ new Map();
+    const pairNotes = /* @__PURE__ */ new Map();
+    if (input.catalog)
+      for (const c of checkValues(scan, input.catalog)) {
+        const k = useKey(c.use.variantId, c.use.indexPath, c.use.field);
+        if (c.bound && c.pairExpected) expectedPair.set(k, __spreadProps(__spreadValues({}, c), { bound: c.bound, pairExpected: c.pairExpected }));
+        if (c.pairNote) pairNotes.set(k, c.pairNote);
+      }
+    const pairNoteOf = (uses) => uses.map((u) => pairNotes.get(useKey(u.variantId, u.indexPath, u.field))).find(Boolean);
+    const localTarget = (id) => {
+      const v = id && input.catalog ? input.catalog.variables.find((x) => x.id === id) : void 0;
+      return (v == null ? void 0 : v.remote) && input.catalog ? localEquivalent(v, input.catalog) : null;
+    };
+    for (const t of tokens.tokens) {
+      const suggestion = `${t.name} \u2192 ${aliasText(t)}`;
+      const source = t.source === "claude" ? "claude" : "rules";
+      for (const u of t.uses)
+        if (isMissing(u))
+          fixFor.set(useKey(u.variantId, u.indexPath, u.field), {
+            suggestion,
+            color: colorById(t.alias.desktop),
+            source
+          });
+      const base = { area: "tokens", source, detail: t.note };
+      if (t.issue === "surface-pairing") {
+        const current = t.previousAlias ? `${t.name} \u2192 ${nameOf(t.previousAlias.desktop)}` : t.replaces;
+        const role = (_b = (_a = t.uses[0]) == null ? void 0 : _a.role) != null ? _b : "other";
+        for (const kind of pairingKinds(!!t.wrongFamily, role)) {
+          out.push(
+            finding(kind, __spreadValues(__spreadProps(__spreadValues(__spreadValues({}, base), layersOf(t.uses)), {
+              current,
+              currentColor: colorOf(t.uses),
+              suggestion,
+              suggestionColor: colorById(t.alias.desktop)
+            }), kind === "role-family" ? { detail: familyDetail(t.previousAlias ? nameOf(t.previousAlias.desktop) : t.replaces, role, pairNoteOf(t.uses)) } : {}))
+          );
+        }
+        continue;
+      }
+      if (t.kind === "rename" || t.issue === "property-split") {
+        out.push(
+          finding(t.kind === "rename" ? "stale-token-name" : "property-split", __spreadProps(__spreadValues(__spreadValues({}, base), layersOf(t.uses)), {
+            current: (_c = t.previousName) != null ? _c : t.replaces,
+            currentColor: null,
+            suggestion: t.name,
+            suggestionColor: null
+          }))
+        );
+        continue;
+      }
+      const raw = t.uses.filter((u) => !u.boundVariableId && !isMissing(u));
+      if (t.match === "none" || raw.length) {
+        if (!raw.length) continue;
+        out.push(
+          finding("raw-value", __spreadProps(__spreadValues(__spreadValues({}, base), layersOf(raw)), {
+            issue: t.match === "none" ? ISSUE["raw-value"] : t.match === "nearest" ? NEAREST_ISSUE : EXACT_ISSUE,
+            severity: t.match === "none" ? "error" : "warning",
+            current: t.replaces,
+            currentColor: colorOf(raw),
+            suggestion: t.match === "none" ? null : suggestion,
+            suggestionColor: t.match === "none" ? null : colorById(t.alias.desktop)
+          }))
+        );
+        continue;
+      }
+      const expected = t.kind === "wrap" ? t.uses.map((u) => expectedPair.get(useKey(u.variantId, u.indexPath, u.field))).find(Boolean) : void 0;
+      if (expected) {
+        out.push(...expectedPairFindings(expected, (_d = colorById(expected.bound.id)) != null ? _d : colorOf(t.uses), layersOf(t.uses)));
+        continue;
+      }
+      if (t.kind === "wrap") {
+        const bound = (_e = t.uses.find((u) => u.boundVariableId)) == null ? void 0 : _e.boundVariableId;
+        const local = t.alias.desktop === t.alias.mobile ? localTarget(t.alias.desktop) : null;
+        out.push(
+          finding("semantic-binding", __spreadValues(__spreadProps(__spreadValues(__spreadValues({}, base), layersOf(t.uses)), {
+            current: bound ? nameOf(bound) : t.replaces,
+            currentColor: (_f = colorById(bound)) != null ? _f : colorOf(t.uses),
+            suggestion: local ? `${t.name} \u2192 ${local.name}` : suggestion,
+            suggestionColor: local ? lightOf(local) : colorById(t.alias.desktop)
+          }), local ? { detail: `Bound directly to the library's ${nameOf(t.alias.desktop)}; wrap it in a component token aliasing the local equivalent ${local.name}.` } : {}))
+        );
+        continue;
+      }
+      if (t.kind === "rebind" || t.kind === "alias-change") {
+        out.push(
+          finding("token-mismatch", __spreadProps(__spreadValues(__spreadValues({}, base), layersOf(t.uses)), {
+            current: t.kind === "alias-change" && t.previousAlias ? `${t.name} \u2192 ${nameOf(t.previousAlias.desktop)}` : t.replaces,
+            currentColor: colorOf(t.uses),
+            suggestion,
+            suggestionColor: colorById(t.alias.desktop)
+          }))
+        );
+      }
+    }
+    for (const u of tokens.unmatched) {
+      const raw = u.uses.filter((x) => !isMissing(x));
+      const s = u.suggestion;
+      for (const x of u.uses) {
+        if (isMissing(x))
+          fixFor.set(useKey(x.variantId, x.indexPath, x.field), {
+            suggestion: s ? `${u.tokenName} \u2192 ${s.variableName}` : u.tokenName,
+            color: colorById(s == null ? void 0 : s.variableId),
+            source: "rules"
+          });
+      }
+      if (!raw.length) continue;
+      out.push(
+        finding("raw-value", __spreadProps(__spreadValues({
+          area: "tokens"
+        }, layersOf(raw)), {
+          severity: "error",
+          current: (_h = (_g = splitRawDisplay(u.display)) == null ? void 0 : _g.value) != null ? _h : u.display,
+          currentColor: colorOf(raw),
+          suggestion: s ? `${u.tokenName} \u2192 ${s.variableName}` : null,
+          suggestionColor: colorById(s == null ? void 0 : s.variableId),
+          source: s ? "rules" : null,
+          detail: u.reason
+        }))
+      );
+    }
+    out.push(...deletedFindings(scan, locate2, fixFor), ...typographyFindings((_i = tokens.typography) != null ? _i : [], layersOf));
+    if (input.catalog) out.push(...libraryFindings(scan, input.catalog, layersOf));
+    return out;
+  }
+  function expectedPairFindings(c, currentColor, where) {
+    return pairingKinds(c.wrongFamily, c.use.role).map(
+      (kind) => finding(kind, __spreadProps(__spreadValues({
+        area: "tokens"
+      }, where), {
+        current: c.bound.name,
+        currentColor,
+        suggestion: c.pairExpected,
+        suggestionColor: null,
+        suggestionNote: LIBRARY_NOTE,
+        source: "rules",
+        detail: kind === "role-family" ? familyDetail(c.bound.name, c.use.role, c.pairNote) : c.pairNote
+      }))
+    );
+  }
+  function boundUses(scan) {
+    const out = /* @__PURE__ */ new Map();
+    for (const v of scan.variants) {
+      const walk = (n) => {
+        var _a, _b, _c;
+        const ids = [...n.fills, ...n.strokes].map((p) => p.boundVariableId).concat(Object.values(n.bound), Object.values((_b = (_a = n.text) == null ? void 0 : _a.bound) != null ? _b : {}));
+        for (const id of new Set(ids)) if (id) out.set(id, [...(_c = out.get(id)) != null ? _c : [], { variantId: v.id, indexPath: n.indexPath }]);
+        n.children.forEach(walk);
+      };
+      walk(v.root);
+    }
+    return out;
+  }
+  function libraryFindings(scan, catalog, layersOf) {
+    const local = new Set(catalog.variables.filter((v) => !v.remote).map(equivalenceKey));
+    const uses = boundUses(scan);
+    return catalog.variables.filter((v) => v.remote && !local.has(equivalenceKey(v))).map((v) => {
+      var _a, _b;
+      const local2 = localEquivalent(v, catalog);
+      return finding("library-token", __spreadProps(__spreadValues(__spreadProps(__spreadValues({
+        area: "tokens"
+      }, layersOf((_a = uses.get(v.id)) != null ? _a : [])), {
+        current: v.name,
+        currentColor: lightOf(v),
+        suggestion: (_b = local2 == null ? void 0 : local2.name) != null ? _b : null,
+        suggestionColor: local2 ? lightOf(local2) : null
+      }), local2 ? { suggestionNote: LOCAL_NOTE } : {}), {
+        source: local2 ? "rules" : null,
+        detail: local2 ? `Library collection "${v.collection}", local equivalent: ${local2.name}.` : `Library collection "${v.collection}", no local equivalent: the design uses another token set.`
+      }));
+    });
+  }
+  function layerLister(scan, locate2) {
+    return (uses) => {
+      const ids = [];
+      let first = null;
+      for (const u of uses) {
+        const where = locate2(u.variantId, u.indexPath);
+        if (!where || ids.includes(where.id)) continue;
+        ids.push(where.id);
+        first != null ? first : first = where.path;
+      }
+      return { nodeIds: ids, layer: first != null ? first : scan.name };
+    };
+  }
+  function deletedFindings(scan, locate2, fixFor) {
+    var _a, _b, _c, _d;
+    const out = [];
+    for (const v of scan.variants) {
+      for (const m of (_a = v.missingUses) != null ? _a : []) {
+        const where = locate2(v.id, m.indexPath);
+        if (!where) continue;
+        const fix = fixFor.get(useKey(v.id, m.indexPath, m.field));
+        out.push(
+          finding("deleted-binding", {
+            area: "tokens",
+            layer: where.path,
+            nodeIds: [where.id],
+            current: `${m.field}: deleted variable`,
+            currentColor: null,
+            suggestion: (_b = fix == null ? void 0 : fix.suggestion) != null ? _b : null,
+            suggestionColor: (_c = fix == null ? void 0 : fix.color) != null ? _c : null,
+            source: (_d = fix == null ? void 0 : fix.source) != null ? _d : null,
+            detail: "The layer keeps the last value, but the variable is gone."
+          })
+        );
+      }
+    }
+    return out;
+  }
+  function typographyFindings(list, layersOf) {
+    return list.map((t) => {
+      const fields = [...new Set(t.uses.flatMap((u) => u.fields))];
+      return finding("unbound-typography", __spreadProps(__spreadValues({
+        area: "tokens"
+      }, layersOf(t.uses)), {
+        current: `${fields.join(", ")} unbound`,
+        currentColor: null,
+        suggestion: t.role,
+        suggestionColor: null,
+        source: "rules",
+        detail: t.note
+      }));
+    });
+  }
+  function pairingKinds(wrongFamily, _role) {
+    return wrongFamily ? ["role-family"] : ["surface-pairing"];
+  }
+  function familyDetail(current, role, pairing) {
+    const family = colorFamily(role).map((p) => p.replace(/^color\//, "") + (p.endsWith("/") ? "*" : ""));
+    const text = `${current} is not a ${role} color; ${role} colors come from ${family.join(", ")}.`;
+    return pairing ? `${text} ${pairing}` : text;
+  }
+  var UNPLACED = { layer: "", nodeIds: [] };
+  var round2 = (n) => String(Math.round(n * 100) / 100);
+  function lightOf(v) {
+    var _a;
+    const val = (v == null ? void 0 : v.type) === "COLOR" ? resolveValue(v, "light", ["global"]) : null;
+    return (val == null ? void 0 : val.hex) ? { hex: val.hex, opacity: (_a = val.opacity) != null ? _a : 1 } : null;
+  }
+  function valueText2(c) {
+    var _a, _b;
+    const u = c.use;
+    if (u.kind === "number") return round2((_a = u.number) != null ? _a : 0);
+    const hex = normalizeHex(u.hex);
+    const opacity = (_b = u.opacity) != null ? _b : 1;
+    return opacity === 1 ? hex : `${hex} @ ${round2(opacity)}`;
+  }
+  function draftTokenFindings(input, locate2) {
+    var _a, _b, _c, _d, _e, _f;
+    const { scan, catalog } = input;
+    const layersOf = layerLister(scan, locate2);
+    const missing = new Set(scan.variants.flatMap((v) => {
+      var _a2;
+      return ((_a2 = v.missingUses) != null ? _a2 : []).map((m) => useKey(v.id, m.indexPath, m.field));
+    }));
+    const fixFor = /* @__PURE__ */ new Map();
+    const rows2 = /* @__PURE__ */ new Map();
+    for (const c of checkValues(scan, catalog)) {
+      if (c.group === "size") continue;
+      const fix = c.pairFix || c.match !== "none" ? c.target : null;
+      const suggested = fix != null ? fix : c.suggestion ? (_a = catalog.variables.find((v) => v.id === c.suggestion.variableId)) != null ? _a : null : null;
+      const k = useKey(c.use.variantId, c.use.indexPath, c.use.field);
+      if (missing.has(k)) {
+        if (suggested)
+          fixFor.set(k, {
+            suggestion: suggested.name,
+            color: lightOf(suggested),
+            source: "rules"
+          });
+        continue;
+      }
+      const value = valueText2(c);
+      const color = c.use.kind === "color" ? { hex: c.use.hex, opacity: (_b = c.use.opacity) != null ? _b : 1 } : null;
+      let fs;
+      if (c.pairFix && fix) {
+        const current = c.bound ? c.bound.name : value;
+        fs = pairingKinds(c.wrongFamily, c.use.role).map(
+          (kind) => {
+            var _a2, _b2;
+            return finding(kind, __spreadValues({
+              area: "tokens",
+              current,
+              currentColor: c.bound ? (_a2 = lightOf(c.bound)) != null ? _a2 : color : color,
+              suggestion: fix.name,
+              suggestionColor: lightOf(fix),
+              source: "rules",
+              detail: kind === "role-family" ? familyDetail(current, c.use.role, (_b2 = c.pairNote) != null ? _b2 : c.pairFix) : c.pairFix
+            }, UNPLACED));
+          }
+        );
+      } else if (c.bound && c.pairExpected) {
+        fs = expectedPairFindings(__spreadProps(__spreadValues({}, c), { bound: c.bound, pairExpected: c.pairExpected }), (_c = lightOf(c.bound)) != null ? _c : color, UNPLACED);
+      } else if (c.bound && c.wrongFamily) {
+        fs = [
+          finding("role-family", __spreadValues({
+            area: "tokens",
+            current: c.bound.name,
+            currentColor: (_d = lightOf(c.bound)) != null ? _d : color,
+            suggestion: null,
+            suggestionColor: null,
+            source: null,
+            detail: familyDetail(c.bound.name, c.use.role)
+          }, UNPLACED))
+        ];
+      } else if (c.bound) {
+        continue;
+      } else if (fix) {
+        fs = [
+          finding("raw-value", __spreadValues({
+            area: "tokens",
+            issue: c.match === "nearest" ? NEAREST_ISSUE : EXACT_ISSUE,
+            current: value,
+            currentColor: color,
+            suggestion: fix.name,
+            suggestionColor: lightOf(fix),
+            source: "rules",
+            detail: c.note
+          }, UNPLACED))
+        ];
+      } else {
+        fs = [
+          finding("raw-value", __spreadValues({
+            area: "tokens",
+            severity: "error",
+            current: value,
+            currentColor: color,
+            suggestion: (_e = suggested == null ? void 0 : suggested.name) != null ? _e : null,
+            suggestionColor: lightOf(suggested),
+            source: suggested ? "rules" : null,
+            detail: c.reason
+          }, UNPLACED))
+        ];
+      }
+      for (const f of fs) {
+        const key = [f.kind, f.issue, f.current, f.suggestion, f.detail].join("|");
+        const row = (_f = rows2.get(key)) != null ? _f : { draft: f, uses: [] };
+        row.uses.push(c.use);
+        rows2.set(key, row);
+      }
+    }
+    const out = [];
+    for (const { draft, uses } of rows2.values()) out.push(__spreadValues(__spreadValues({}, draft), layersOf(uses)));
+    out.push(
+      ...deletedFindings(scan, locate2, fixFor),
+      ...typographyFindings(proposeTypography(scan, catalog, []), layersOf),
+      ...libraryFindings(scan, catalog, layersOf)
+    );
+    return out;
+  }
+  var bySeverity = (a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity];
+  function buildQaReport(input) {
+    const locate2 = locator(input.scan);
+    const naming = namingFindings(input, locate2).sort(bySeverity);
+    const tokens = tokenFindings(input, locate2).sort(bySeverity);
+    return {
+      componentId: input.scan.id,
+      componentName: input.scan.name,
+      naming: input.namingSource,
+      findings: [...naming, ...tokens].map((f, i) => __spreadProps(__spreadValues({}, f), {
+        id: `${f.kind}:${i}`
+      })),
+      notes: [.../* @__PURE__ */ new Set([...input.naming.warnings, ...input.tokens.warnings])]
+    };
+  }
+  function buildDraftQaReport(input) {
+    const locate2 = locator(input.scan);
+    const naming = namingFindings(input, locate2, true).sort(bySeverity);
+    const tokens = draftTokenFindings(input, locate2).sort(bySeverity);
+    return {
+      componentId: input.scan.id,
+      componentName: input.scan.name,
+      naming: input.namingSource,
+      findings: [...naming, ...tokens].map((f, i) => __spreadProps(__spreadValues({}, f), {
+        id: `${f.kind}:${i}`
+      })),
+      // Catalog problems only: everything else the token scan warns about needs the component token layer.
+      notes: modeWarnings(input.catalog),
+      draft: true
+    };
+  }
+
+  // src/snapshot.ts
+  var KEYS = [
+    "width",
+    "height",
+    "paddingLeft",
+    "paddingRight",
+    "paddingTop",
+    "paddingBottom",
+    "itemSpacing",
+    "topLeftRadius",
+    "topRightRadius",
+    "bottomLeftRadius",
+    "bottomRightRadius",
+    "strokeWeight",
+    "fontSize"
+  ];
+  var PAD = ["paddingLeft", "paddingRight", "paddingTop", "paddingBottom"];
+  var RAD = ["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"];
+  var TXT = ["fontFamily", "fontStyle", "fontSize", "lineHeight", "letterSpacing"];
+  var round3 = (x) => Math.round(x * 100) / 100;
+  function paints(value) {
+    if (!Array.isArray(value)) return void 0;
+    return value.filter((p) => p.visible !== false && p.type === "SOLID").map((p) => toHex(p.color) + (p.opacity !== void 0 && p.opacity < 1 ? "@" + round3(p.opacity) : ""));
+  }
+  async function rootNode(rootId) {
+    const node = await figma.getNodeByIdAsync(rootId);
+    if (!node || node.type === "DOCUMENT" || node.type === "PAGE") throw new Error(`Node ${rootId} not found`);
+    return node;
+  }
+  async function takeSnapshot(rootId) {
+    const root = await rootNode(rootId);
+    const out = {};
+    const walk = (n, path) => {
+      const p = path ? path + " > " + n.name : n.name;
+      const bag = n;
+      const s = {};
+      for (const k of KEYS) {
+        const v = bag[k];
+        if (typeof v === "number") s[k] = round3(v);
+      }
+      s.fills = paints(bag.fills);
+      s.strokes = paints(bag.strokes);
+      if (n.type === "TEXT") {
+        const style = textStyleOf(n);
+        s.font = style ? `${style.fontFamily} ${style.fontStyle}` : "mixed";
+        if (style) {
+          const px2 = (m) => round3(m.unit === "PERCENT" ? m.value * style.fontSize / 100 : m.value);
+          s.lineHeight = style.lineHeight.unit === "AUTO" ? "auto" : px2(style.lineHeight);
+          s.letterSpacing = px2(style.letterSpacing);
+        }
+      }
+      out[n.id + " " + p] = s;
+      if ("children" in n && n.type !== "INSTANCE") for (const c of n.children) walk(c, p);
+    };
+    walk(root, "");
+    return out;
+  }
+  function byId(snap) {
+    const map = /* @__PURE__ */ new Map();
+    for (const [key, fields] of Object.entries(snap)) {
+      const sp = key.indexOf(" ");
+      const id = sp < 0 ? key : key.slice(0, sp);
+      map.set(id, { path: sp < 0 ? "" : key.slice(sp + 1), fields });
+    }
+    return map;
+  }
+  var show2 = (v) => v === void 0 ? "none" : Array.isArray(v) ? `[${v.join(", ")}]` : String(v);
+  function diffSnapshots(before, after) {
+    const a = byId(before);
+    const b = byId(after);
+    const lines = [];
+    for (const [id, prev] of a) {
+      const next = b.get(id);
+      if (!next) {
+        lines.push(`${prev.path}: layer removed`);
+        continue;
+      }
+      const fields = /* @__PURE__ */ new Set([...Object.keys(prev.fields), ...Object.keys(next.fields)]);
+      for (const f of fields) {
+        const x = prev.fields[f];
+        const y = next.fields[f];
+        if (JSON.stringify(x) !== JSON.stringify(y)) lines.push(`${next.path} \u203A ${f}: ${show2(x)} -> ${show2(y)}`);
+      }
+    }
+    for (const [id, next] of b) if (!a.has(id)) lines.push(`${next.path}: layer added`);
+    return lines;
+  }
+  async function auditComponent(rootId) {
+    const root = await rootNode(rootId);
+    const cols = await figma.variables.getLocalVariableCollectionsAsync();
+    const colName = new Map(cols.map((c) => [c.id, c.name]));
+    const varCache = /* @__PURE__ */ new Map();
+    const getVar = (id) => {
+      let p = varCache.get(id);
+      if (!p) {
+        p = getLiveVariable(id);
+        varCache.set(id, p);
+      }
+      return p;
+    };
+    const issues = [];
+    const check = async (n, field, alias, want) => {
+      var _a;
+      const id = alias && typeof alias === "object" ? alias.id : void 0;
+      if (typeof id !== "string") {
+        issues.push(`${n.name} \u203A ${field}: raw value`);
+        return;
+      }
+      const v = await getVar(id);
+      if (!v) {
+        issues.push(`${n.name} \u203A ${field}: bound to a deleted variable (raw value)`);
+        return;
+      }
+      const col = (_a = colName.get(v.variableCollectionId)) != null ? _a : "library";
+      if (col !== want) issues.push(`${n.name} \u203A ${field}: bound to ${col}/${v.name}, should be ${want}`);
+    };
+    const walk = async (n) => {
+      var _a, _b;
+      if (n.type !== "COMPONENT_SET") {
+        const bag = n;
+        const b = "boundVariables" in n && n.boundVariables || {};
+        const auto = typeof bag.layoutMode === "string" && bag.layoutMode !== "NONE";
+        const pos = (k) => typeof bag[k] === "number" && bag[k] > 0;
+        if (auto) {
+          for (const k of PAD) if (pos(k)) await check(n, k, b[k], "components");
+        }
+        if (auto && pos("itemSpacing") && bag.primaryAxisAlignItems !== "SPACE_BETWEEN")
+          await check(n, "itemSpacing", b.itemSpacing, "components");
+        for (const k of RAD) if (pos(k)) await check(n, k, b[k], "components");
+        const strokes = bag.strokes;
+        const hasStroke = Array.isArray(strokes) && strokes.some((s) => s.visible !== false);
+        if (hasStroke && pos("strokeWeight")) await check(n, "strokeWeight", b.strokeWeight, "components");
+        for (const key of ["fills", "strokes"]) {
+          const list = bag[key];
+          if (!Array.isArray(list)) continue;
+          for (const p of list) {
+            if (p.visible !== false && p.type === "SOLID") await check(n, key, (_a = p.boundVariables) == null ? void 0 : _a.color, "components");
+          }
+        }
+        if (n.type === "TEXT") {
+          for (const k of TXT) {
+            const a = b[k];
+            if (k === "lineHeight" && !(Array.isArray(a) ? a[0] : a) && ((_b = bag.lineHeight) == null ? void 0 : _b.unit) === "AUTO") continue;
+            await check(n, k, Array.isArray(a) ? a[0] : a, "typography");
+          }
+        }
+      }
+      if ("children" in n && n.type !== "INSTANCE") for (const c of n.children) await walk(c);
+    };
+    await walk(root);
+    return issues.length ? issues : "PASS";
   }
 
   // src/code.ts
@@ -3787,16 +4686,26 @@
     componentsModes: { desktop: null, mobile: null }
   };
   var pending = null;
-  figma.showUI(__html__, { width: 720, height: 640, title: "Component Studio" });
+  var lastWasCheck = false;
+  var launch = figma.command === "check" ? "check" : "open";
+  figma.showUI(__html__, { width: 720, height: 640, title: "Component Studio", themeColors: true });
+  setSidebarRelaunch();
+  function setSidebarRelaunch() {
+    try {
+      figma.root.setRelaunchData({ open: "" });
+      figma.currentPage.setRelaunchData({ open: "" });
+    } catch (e) {
+    }
+  }
   function post(msg) {
     figma.ui.postMessage(msg);
   }
   function errorText3(e) {
     return e instanceof Error ? e.message : String(e);
   }
-  async function scanForRename(node, useClaude) {
+  async function scanForRename(node, useClaude, scanned) {
     var _a;
-    const scan = await scanComponent(node);
+    const scan = scanned != null ? scanned : await scanComponent(node);
     const reference = scan.variants[0].root;
     const rules = proposeLayerNames(reference);
     const proposal = {
@@ -3824,8 +4733,7 @@
       naming: parsed.naming
     };
   }
-  async function scanTokensWithClaude(node, catalog, useClaude, assume) {
-    const proposal = await scanForTokens(node, catalog, assume);
+  async function scanTokensWithClaude(node, catalog, useClaude, proposal) {
     if (!useClaude) return { proposal, usedClaude: false };
     const raw = node.getSharedPluginData(NAMING_NAMESPACE, TOKENS_KEY);
     if (raw === "") return { proposal, usedClaude: false };
@@ -3844,11 +4752,48 @@
       ({ proposal, naming } = await scanForRename(node, useClaude));
       usedClaude = naming.source === "claude";
     } else {
-      ({ proposal, usedClaude } = await scanTokensWithClaude(node, catalog, useClaude, assume != null ? assume : []));
+      ({ proposal, usedClaude } = await scanTokensWithClaude(node, catalog, useClaude, await scanForTokens(node, catalog, assume != null ? assume : [])));
     }
+    lastWasCheck = false;
     pending = { phase, componentId: proposal.componentId, catalog, usedClaude };
-    const semantic = catalog.variables.filter((v) => v.collection !== "components").map(semanticToken);
-    post(__spreadValues({ type: "component/proposal", phase, naming, proposal, semantic }, assume ? { repaired: true } : {}));
+    post(__spreadValues({ type: "component/proposal", phase, naming, proposal, semantic: semanticTokens(catalog) }, assume ? { repaired: true } : {}));
+  }
+  function semanticTokens(catalog) {
+    return catalog.variables.filter((v) => v.collection !== "components").map(semanticToken);
+  }
+  async function handleCheck(useClaude) {
+    pending = null;
+    lastWasCheck = true;
+    const node = selectedRoot();
+    const [scan, catalog] = await Promise.all([scanComponent(node), loadCatalog().then((local) => withBoundVariables(local, node))]);
+    const { proposal: naming, naming: namingSource } = await scanForRename(node, useClaude, scan);
+    if (node.type === "FRAME") {
+      post({ type: "component/report", report: buildDraftQaReport({ scan, naming, namingSource, catalog }) });
+      return;
+    }
+    const { proposal: base, setup } = await tokenScan(node, catalog, [], scan);
+    const { proposal: tokens } = await scanTokensWithClaude(node, catalog, useClaude, base);
+    const semantic = semanticTokens(catalog);
+    const report = buildQaReport({ scan, naming, namingSource, tokens: __spreadProps(__spreadValues({}, tokens), { warnings: [...setup, ...tokens.warnings] }), semantic, catalog });
+    post({ type: "component/report", report });
+  }
+  function pageOf(node) {
+    let n = node;
+    while (n && n.type !== "PAGE") n = n.parent;
+    return n;
+  }
+  async function selectLayers(ids) {
+    const found = await Promise.all(ids.map((id) => figma.getNodeByIdAsync(id)));
+    const nodes = found.filter((n) => !!n && n.type !== "DOCUMENT" && n.type !== "PAGE");
+    if (!nodes.length) throw new Error("That layer no longer exists. Check the component again.");
+    const page = pageOf(nodes[0]);
+    if (page && page.id !== figma.currentPage.id) await figma.setCurrentPageAsync(page);
+    const onPage = nodes.filter((n) => {
+      var _a;
+      return ((_a = pageOf(n)) == null ? void 0 : _a.id) === (page == null ? void 0 : page.id);
+    });
+    figma.currentPage.selection = onPage;
+    figma.viewport.scrollAndZoomIntoView(onPage);
   }
   function semanticToken(v) {
     var _a;
@@ -3863,6 +4808,7 @@
     return base;
   }
   async function handleApply(proposal) {
+    if (lastWasCheck) throw new Error("QA check is read-only. Switch to Rename layers or Create tokens and scan the component to apply changes.");
     if (!pending || pending.componentId !== proposal.componentId) {
       throw new Error("This review is out of date. Scan the component again.");
     }
@@ -3875,6 +4821,7 @@
     const staleTokenNames = phase === "rename" ? await staleTokensAfterRename(proposal.componentId) : 0;
     const result = __spreadValues(__spreadProps(__spreadValues({}, outcome), { snapshotDiff: diffSnapshots(before, after), audit }), staleTokenNames ? { staleTokenNames } : {});
     pending = null;
+    await setComponentRelaunch(proposal.componentId);
     post({ type: "component/applied", phase, result });
     if (lookChangeView(result, proposal).kind === "loud") {
       figma.notify("The component looks different after apply. Check the result, undo with Cmd+Z if needed.", {
@@ -3891,6 +4838,14 @@
       return 0;
     }
   }
+  async function setComponentRelaunch(rootId) {
+    const root = await figma.getNodeByIdAsync(rootId);
+    if (!root || !("setRelaunchData" in root)) return;
+    try {
+      root.setRelaunchData({ open: "", check: RELAUNCH_CHECK_DESCRIPTION });
+    } catch (e) {
+    }
+  }
   async function clearStoredProposal(rootId, key) {
     const root = await figma.getNodeByIdAsync(rootId);
     if (root && "setSharedPluginData" in root) root.setSharedPluginData(NAMING_NAMESPACE, key, "");
@@ -3900,6 +4855,9 @@
       if (msg.type === "component/scan") await handleScan(msg.phase, msg.useClaude, msg.assume);
       else if (msg.type === "component/apply") await handleApply(msg.proposal);
       else if (msg.type === "component/cancel") pending = null;
+      else if (msg.type === "component/check") await handleCheck(msg.useClaude);
+      else if (msg.type === "qa/select") await selectLayers(msg.nodeIds);
+      else if (msg.type === "ui/ready") post({ type: "plugin/launch", command: launch });
       else if (msg.type === "bridge/request") post({ type: "bridge/response", response: await handleBridgeRequest(msg.request) });
     } catch (e) {
       post({ type: "component/error", message: errorText3(e) });

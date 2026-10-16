@@ -172,3 +172,15 @@ export function paddingProperties(
     { property: "paddingBottom", value: b, sides: ["bottom"] },
   ];
 }
+
+// One step 2 warning per token name that several values claim. Built and parsed here so the review can group them.
+const CONFLICT = /^Token name "(.+)" maps to different values \((.+)\); rename one row before applying\.$/;
+
+export function valueConflictWarning(name: string, values: string[]): string {
+  return `Token name "${name}" maps to different values (${values.join(", ")}); rename one row before applying.`;
+}
+
+export function parseValueConflict(warning: string): { name: string; values: string } | null {
+  const m = CONFLICT.exec(warning);
+  return m ? { name: m[1], values: m[2] } : null;
+}

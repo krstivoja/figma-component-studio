@@ -3,11 +3,10 @@ import {
   compareTokenNames,
   filterGroups,
   formatValue,
-  initialActive,
   matchesQuery,
-  moveActive,
   shortName,
   sortByTokenName,
+  swatchFill,
   triggerText,
 } from "../../src/tokenPicker";
 
@@ -156,26 +155,18 @@ describe("formatting", () => {
   });
 });
 
-describe("selection", () => {
-  const options = [
-    { id: "a", label: "a" },
-    { id: "b", label: "b" },
-    { id: "c", label: "c" },
-  ];
-
-  it("starts on the current value, else the first option", () => {
-    expect(initialActive(options, "b")).toBe(1);
-    expect(initialActive(options, null)).toBe(0);
-    expect(initialActive(options, "gone")).toBe(0);
-    expect(initialActive([], "a")).toBe(-1);
+describe("swatchFill", () => {
+  it("paints opaque colors solid", () => {
+    expect(swatchFill({ light: { hex: "#0059FF", opacity: 1 } })).toEqual({ kind: "solid", color: "#0059FF" });
   });
 
-  it("moves within bounds", () => {
-    expect(moveActive(0, 1, 3)).toBe(1);
-    expect(moveActive(2, 1, 3)).toBe(2);
-    expect(moveActive(0, -1, 3)).toBe(0);
-    expect(moveActive(-1, 1, 3)).toBe(0);
-    expect(moveActive(-1, -1, 3)).toBe(2);
-    expect(moveActive(0, 1, 0)).toBe(-1);
+  it("puts translucent colors over a checkerboard", () => {
+    expect(swatchFill({ light: { hex: "#FF0000", opacity: 0.5 } })).toEqual({ kind: "checker", color: "rgba(255, 0, 0, 0.5)" });
+  });
+
+  it("marks missing or malformed colors as unknown", () => {
+    expect(swatchFill(undefined)).toEqual({ kind: "unknown" });
+    expect(swatchFill({})).toEqual({ kind: "unknown" });
+    expect(swatchFill({ light: { hex: "red", opacity: 1 } })).toEqual({ kind: "unknown" });
   });
 });

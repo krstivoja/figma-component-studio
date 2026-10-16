@@ -201,3 +201,13 @@ export function matchColor(
     return a.variable.name < b.variable.name ? -1 : a.variable.name > b.variable.name ? 1 : 0;
   });
 }
+
+// Alias target names compared across schemes: the library's "color/brand blue/40" (collection "color") and the file's
+// "brand blue/40" (collection "_global") are the same primitive. Drops the own-collection and "color/" prefixes.
+export function primitiveKey(name: string, collection: string): string {
+  let n = name.trim().toLowerCase();
+  const own = `${collection.trim().toLowerCase()}/`;
+  if (n.startsWith(own)) n = n.slice(own.length);
+  if (n.startsWith("color/")) n = n.slice("color/".length);
+  return n.replace(/\s+/g, " ");
+}

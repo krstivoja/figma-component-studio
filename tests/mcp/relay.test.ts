@@ -106,6 +106,7 @@ describe("tool argument schemas", () => {
       "studio_get_tokens",
       "studio_propose_names",
       "studio_propose_tokens",
+      "studio_inspect_variables",
     ]);
     for (const tool of TOOLS) expect(tool.description).toMatch(/Apply/);
   });

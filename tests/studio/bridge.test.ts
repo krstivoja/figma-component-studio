@@ -3,7 +3,7 @@ import { isBridgeRequest, nextRetryDelay, parseBridgeFrame } from "../../src/bri
 
 describe("isBridgeRequest", () => {
   it("accepts every studio tool with an id and args", () => {
-    for (const tool of ["studio_status", "studio_get_component", "studio_get_tokens", "studio_propose_names", "studio_propose_tokens"]) {
+    for (const tool of ["studio_status", "studio_get_component", "studio_get_tokens", "studio_propose_names", "studio_propose_tokens", "studio_inspect_variables"]) {
       expect(isBridgeRequest({ id: "1", tool, args: {} })).toBe(true);
     }
   });

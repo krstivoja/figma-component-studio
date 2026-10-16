@@ -143,6 +143,16 @@ Padding was 12 on all sides -> `card-markooo/spacing/padding` (padding/s) bound 
 - A bound token whose property no longer fits (top/bottom on `padding`) -> rename row `padding` -> `paddingY` when all its uses agree (no visible change, checked); if `padding` is still right for other layers -> new `paddingY` token aliasing the same step + rebind only those sides.
 - Real case test: after apply, `card-markooo/spacing/paddingX` -> `padding/xl` on left/right, `card-markooo/spacing/paddingY` -> `padding/s` on top/bottom, no `padding` token bound anywhere in the component, re-scan proposes nothing.
 
+## Plugin as a read-only bridge (2026-10-16)
+Claude debugs the open file through Component Studio itself, no separate Desktop Bridge plugin.
+- New tool `studio_inspect_variables` (read only): for the selected root and the file:
+  - local collections with modes and variable counts;
+  - every variable bound anywhere in the selection: id, name, collection, local vs remote (library) with library/collection name, resolved light/dark or desktop/mobile values, and which layer + field uses it;
+  - library collections available to the file (`figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync`, names + library + variable count only; nothing imported).
+- Manifest gets `"permissions": ["teamlibrary"]`.
+- Still no apply or execute tool; nothing is imported or written.
+- Tests under tests/studio and tests/mcp.
+
 ## Files (expected)
 - `mcp/server.ts`, `mcp/package.json` (or root `package.json` scripts), `.mcp.json`
 - `src/bridge.ts` (UI-side WebSocket + relay), `src/studioTools.ts` (sandbox handlers, reuse scan/match/proposal)
@@ -172,4 +182,6 @@ Padding was 12 on all sides -> `card-markooo/spacing/padding` (padding/s) bound 
 - [x] Split by surface, pairing on post-proposal state, reuse safety, typography binding, "by hand" path removed; alias change with no visible change comes checked; 382 tests incl. card-marko e2e (surface 1 and brand)
 - [ ] Real Figma run of the re-check on card-marko (deleted tokens state) and of the creation order
 - [ ] Open question: alias changes are allowed on any token in the component's own namespace (always unchecked), not only plugin-created ones
+- [x] Read-only bridge: `studio_inspect_variables` (local collections, bound variables grouped by id with per-mode values, aliasOf, missing, remote library info and usedBy layer + field; library collections with counts or `{ error }`; caps 300 x 50 with `truncated`), resolver shared with `loadCatalog` (`createResolver`), manifest `teamlibrary` permission, write-guard test (no writes, no imports); 506 tests
+- [ ] Real Figma run of `studio_inspect_variables` (library collections need the `teamlibrary` permission; reload the plugin after the manifest change)
 - [ ] User run from a real `claude` session in this folder: naming skill -> Load it -> Apply; tokens skill -> Load it -> Apply

@@ -276,10 +276,10 @@ describe("result summary", () => {
   };
 
   it("names the step and shows only the counts that matter for it", () => {
-    expect(stepTitle("rename")).toBe("Step 1: rename layers");
-    expect(stepTitle("tokens")).toBe("Step 2: create tokens");
-    expect(summarizeResult(result, "rename")).toBe("Step 1: rename layers applied. 3 renamed");
-    expect(summarizeResult(result, "tokens")).toBe("Step 2: create tokens applied. 2 tokens created, 1 reused, 5 bound");
+    expect(stepTitle("rename")).toBe("Rename layers");
+    expect(stepTitle("tokens")).toBe("Create tokens");
+    expect(summarizeResult(result, "rename")).toBe("Rename layers applied. 3 renamed");
+    expect(summarizeResult(result, "tokens")).toBe("Create tokens applied. 2 tokens created, 1 reused, 5 bound");
   });
 
   it("treats a skipped audit as neither PASS nor issues", () => {
