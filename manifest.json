@@ -6,6 +6,8 @@
   "ui": "dist/ui.html",
   "editorType": ["figma"],
   "networkAccess": {
-    "allowedDomains": ["none"]
+    "allowedDomains": ["ws://localhost:9240"],
+    "devAllowedDomains": ["ws://localhost:9240"],
+    "reasoning": "Connects to the local Component Studio MCP server so Claude Code can read the selected component and propose names and tokens."
   }
 }

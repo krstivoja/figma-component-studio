@@ -1,3 +1,4 @@
+import { getLiveVariable } from "./variables";
 import type {
   BindableField,
   Catalog,
@@ -8,8 +9,12 @@ import type {
   RawValueUse,
   SolidPaint as PlainPaint,
   Sizing,
+  TextInfo,
+  TextStyleValues,
+  TypographyField,
   VariantScan,
 } from "./types";
+import { COMPONENT_ID_KEY, TYPOGRAPHY_FIELDS } from "./types";
 
 type Bag = Record<string, unknown>;
 
@@ -105,12 +110,18 @@ export function isIconLike(layer: LayerNode): boolean {
   );
 }
 
+type PaintIndexes = Map<string, { fills: number[]; strokes: number[] }>;
+
 // paintIndex in the result is the index into the Figma node's real paint array, so the binder can address it.
-export function collectUses(
-  variantId: string,
-  root: LayerNode,
-  paintIndexes: Map<string, { fills: number[]; strokes: number[] }> = new Map(),
-): RawValueUse[] {
+export function collectUses(variantId: string, root: LayerNode, paintIndexes: PaintIndexes = new Map()): RawValueUse[] {
+  return walkUses(variantId, root, paintIndexes, false);
+}
+
+export function collectBoundUses(variantId: string, root: LayerNode, paintIndexes: PaintIndexes = new Map()): RawValueUse[] {
+  return walkUses(variantId, root, paintIndexes, true);
+}
+
+function walkUses(variantId: string, root: LayerNode, paintIndexes: PaintIndexes, bound: boolean): RawValueUse[] {
   const uses: RawValueUse[] = [];
   const insideControl = root.height <= CONTROL_MAX_HEIGHT;
 
@@ -118,8 +129,19 @@ export function collectUses(
     if (!layer.visible) return;
     const base = { variantId, indexPath: layer.indexPath, layerName: layer.name };
     const pushNumber = (field: BindableField, value: number) => {
-      if (!(value > 0) || layer.bound[field]) return;
-      uses.push({ ...base, field, paintIndex: null, kind: "number", number: value, hex: null, opacity: null, role: "other" });
+      const id = layer.bound[field];
+      if (!(value > 0) || !!id !== bound) return;
+      uses.push({
+        ...base,
+        field,
+        paintIndex: null,
+        kind: "number",
+        number: value,
+        hex: null,
+        opacity: null,
+        role: "other",
+        ...(id ? { boundVariableId: id } : {}),
+      });
     };
     const l = layer.layout;
     if (l.mode !== "NONE") {
@@ -143,7 +165,7 @@ export function collectUses(
     const fillRole = detectColorRole(layer.kind, { isIconLike: isIconLike(layer), isInsideControl: insideControl });
     const pushPaints = (field: "fills" | "strokes", paints: PlainPaint[], real: number[] | undefined) => {
       paints.forEach((p, i) => {
-        if (p.boundVariableId) return;
+        if (!!p.boundVariableId !== bound) return;
         uses.push({
           ...base,
           field,
@@ -153,6 +175,7 @@ export function collectUses(
           hex: p.hex,
           opacity: p.opacity,
           role: field === "strokes" ? "border" : fillRole,
+          ...(p.boundVariableId ? { boundVariableId: p.boundVariableId } : {}),
         });
       });
     };
@@ -237,20 +260,44 @@ async function mainComponentName(node: InstanceNode): Promise<string | null> {
   return main.parent && main.parent.type === "COMPONENT_SET" ? main.parent.name : main.name;
 }
 
-function textOf(node: TextNode): { characters: string; fontSize: number } {
+export function textStyleOf(node: Pick<TextNode, "fontName" | "fontSize" | "lineHeight" | "letterSpacing">): TextStyleValues | null {
+  const { fontName, fontSize, lineHeight, letterSpacing } = node;
+  if (fontName === figma.mixed || fontSize === figma.mixed || lineHeight === figma.mixed || letterSpacing === figma.mixed) return null;
+  return {
+    fontFamily: fontName.family,
+    fontStyle: fontName.style,
+    fontSize,
+    lineHeight: lineHeight.unit === "AUTO" ? { unit: "AUTO" } : { unit: lineHeight.unit, value: lineHeight.value },
+    letterSpacing: { unit: letterSpacing.unit, value: letterSpacing.value },
+  };
+}
+
+function textBoundOf(node: TextNode): Partial<Record<TypographyField, string>> {
+  const raw = (node.boundVariables ?? {}) as Bag;
+  const bound: Partial<Record<TypographyField, string>> = {};
+  for (const f of TYPOGRAPHY_FIELDS) {
+    const a = raw[f];
+    const alias = Array.isArray(a) ? a[0] : a;
+    const id = alias && typeof alias === "object" ? (alias as Bag).id : undefined;
+    if (typeof id === "string") bound[f] = id;
+  }
+  return bound;
+}
+
+function textOf(node: TextNode): TextInfo {
   let fontSize = 0;
   if (typeof node.fontSize === "number") fontSize = node.fontSize;
   else {
     const seg = node.getStyledTextSegments(["fontSize"])[0];
     if (seg) fontSize = seg.fontSize;
   }
-  return { characters: node.characters, fontSize };
+  return { characters: node.characters, fontSize, style: textStyleOf(node), bound: textBoundOf(node) };
 }
 
 async function buildLayer(
   node: SceneNode,
   indexPath: number[],
-  paintIndexes: Map<string, { fills: number[]; strokes: number[] }>,
+  paintIndexes: PaintIndexes,
 ): Promise<LayerNode> {
   const kind = kindOf(node.type);
   const bag = node as unknown as Bag;
@@ -316,6 +363,52 @@ function variantPropsOf(node: ComponentNode, inSet: boolean): Record<string, str
   return parseVariantName(node.name);
 }
 
+export type BindingState = "none" | "live" | "missing";
+
+export function classifyBinding(id: string | null | undefined, isLive: (id: string) => boolean): BindingState {
+  if (!id) return "none";
+  return isLive(id) ? "live" : "missing";
+}
+
+function boundIds(layer: LayerNode, out: Set<string> = new Set()): Set<string> {
+  for (const p of [...layer.fills, ...layer.strokes]) if (p.boundVariableId) out.add(p.boundVariableId);
+  for (const id of Object.values(layer.bound)) if (id) out.add(id);
+  for (const id of Object.values(layer.text?.bound ?? {})) if (id) out.add(id);
+  for (const c of layer.children) boundIds(c, out);
+  return out;
+}
+
+// A binding to a deleted variable keeps the last value; it is treated as raw so it gets a token again.
+export function stripMissingBindings(layer: LayerNode, isLive: (id: string) => boolean): number {
+  let count = 0;
+  for (const p of [...layer.fills, ...layer.strokes]) {
+    if (classifyBinding(p.boundVariableId, isLive) !== "missing") continue;
+    p.boundVariableId = null;
+    count++;
+  }
+  for (const [field, id] of Object.entries(layer.bound) as Array<[BindableField, string]>) {
+    if (classifyBinding(id, isLive) !== "missing") continue;
+    delete layer.bound[field];
+    if (field !== "fills" && field !== "strokes") count++;
+  }
+  const textBound = layer.text?.bound ?? {};
+  for (const [field, id] of Object.entries(textBound) as Array<[TypographyField, string]>) {
+    if (classifyBinding(id, isLive) === "missing") delete textBound[field];
+  }
+  for (const c of layer.children) count += stripMissingBindings(c, isLive);
+  return count;
+}
+
+async function liveVariableIds(ids: Set<string>): Promise<Set<string>> {
+  const live = new Set<string>();
+  await Promise.all(
+    [...ids].map(async (id) => {
+      if (await getLiveVariable(id)) live.add(id);
+    }),
+  );
+  return live;
+}
+
 export type ScanRoot = ComponentNode | ComponentSetNode | FrameNode;
 
 export async function scanComponent(node: ScanRoot): Promise<ComponentScan> {
@@ -326,13 +419,17 @@ export async function scanComponent(node: ScanRoot): Promise<ComponentScan> {
 
   const variants: VariantScan[] = [];
   for (const comp of components) {
-    const paintIndexes = new Map<string, { fills: number[]; strokes: number[] }>();
+    const paintIndexes: PaintIndexes = new Map();
     const root = await buildLayer(comp, [], paintIndexes);
+    const live = await liveVariableIds(boundIds(root));
+    const missingBindings = stripMissingBindings(root, (id) => live.has(id));
     variants.push({
       id: comp.id,
       props: comp.type === "COMPONENT" ? variantPropsOf(comp, isSet) : {},
       root,
       uses: collectUses(comp.id, root, paintIndexes),
+      boundUses: collectBoundUses(comp.id, root, paintIndexes),
+      ...(missingBindings ? { missingBindings } : {}),
     });
   }
 
@@ -400,6 +497,7 @@ export async function loadCatalog(): Promise<Catalog> {
   };
 
   const variables: CatalogVariable[] = [];
+  const isComponents = (c: VariableCollection) => c.name.trim().toLowerCase() === "components";
   for (const col of collections) {
     const vars = await Promise.all(col.variableIds.map(getVariable));
     for (const v of vars) {
@@ -408,14 +506,29 @@ export async function loadCatalog(): Promise<Catalog> {
       for (const mode of col.modes) {
         const value = await resolve(v, mode.name, mode.modeId);
         if (typeof value === "number") values[mode.name] = { number: value };
+        else if (typeof value === "string") values[mode.name] = { string: value };
         else if (isRgb(value)) values[mode.name] = { hex: toHex(value), opacity: "a" in value ? value.a : 1 };
         else values[mode.name] = {};
       }
-      variables.push({ id: v.id, name: v.name, collection: col.name, type: v.resolvedType, values });
+      const aliasOf: Record<string, string> = {};
+      for (const mode of col.modes) {
+        const raw = v.valuesByMode[mode.modeId];
+        if (isAlias(raw)) aliasOf[mode.name] = raw.id;
+      }
+      const componentId = isComponents(col) ? v.getPluginData(COMPONENT_ID_KEY) : "";
+      variables.push({
+        id: v.id,
+        name: v.name,
+        collection: col.name,
+        type: v.resolvedType,
+        values,
+        ...(Object.keys(aliasOf).length ? { aliasOf } : {}),
+        ...(componentId ? { componentId } : {}),
+      });
     }
   }
 
-  const components = collections.find((c) => c.name.trim().toLowerCase() === "components") ?? null;
+  const components = collections.find(isComponents) ?? null;
   const modeId = (name: string) =>
     components?.modes.find((m) => m.name.trim().toLowerCase() === name)?.modeId ?? null;
 

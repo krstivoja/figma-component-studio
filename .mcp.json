@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "component-studio": {
+      "command": "npx",
+      "args": ["--no-install", "tsx", "mcp/server.ts"]
+    }
+  }
+}

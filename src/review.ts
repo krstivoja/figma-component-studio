@@ -1,10 +1,29 @@
-import type { ApplyResult, CatalogVariable, Phase, Proposal, TokenProposal } from "./types";
+import { creationOrder } from "./apply";
+import { inRoleFamily } from "./match";
+import { sortByTokenName } from "./tokenPicker";
+import type {
+  ApplyResult,
+  CatalogVariable,
+  LayerRename,
+  NamingSource,
+  Phase,
+  Proposal,
+  RawValueUse,
+  RowChoice,
+  SemanticToken,
+  TokenProposal,
+  TypographyField,
+  TypographyProposal,
+  UnmatchedValue,
+} from "./types";
 
 export interface SemanticOption {
   id: string;
   name: string;
   collection: string;
   type: CatalogVariable["type"];
+  light?: SemanticToken["light"];
+  value?: number;
 }
 
 export interface OptionGroup {
@@ -19,6 +38,8 @@ export interface RenameRow {
   newName: string;
   reason: string;
   apply: boolean;
+  source: LayerRename["source"];
+  outsideVocabulary: boolean;
 }
 
 export interface TokenRow {
@@ -27,6 +48,7 @@ export interface TokenRow {
   apply: boolean;
   status: TokenProposal["status"];
   match: TokenProposal["match"];
+  source: TokenProposal["source"];
   splitModes: boolean;
   aliasDesktop: string | null;
   aliasMobile: string | null;
@@ -34,12 +56,31 @@ export interface TokenRow {
   replaces: string;
   useCount: number;
   note: string | null;
+  kind: TokenProposal["kind"] | null;
+  previousAlias: string | null; // alias-change: current alias name(s), shown as old -> new
+  previousName: string | null; // rename: current token name, shown as old -> new
+  surface: boolean; // changes a background: text pairing is recomputed when it is toggled or edited
+}
+
+export interface TypographyRow {
+  key: string;
+  role: string;
+  apply: boolean;
+  match: TypographyProposal["match"];
+  layerCount: number;
+  bindings: Array<{ field: TypographyField; variable: string }>;
+  note: string | null;
 }
 
 export interface RawRow {
+  key: string | null; // UnmatchedValue key, null for legacy match none tokens that cannot be adopted
   display: string;
   useCount: number;
   reason: string;
+  options: OptionGroup[];
+  selected: string | null; // pre-selected option id (the role-default suggestion)
+  suggested: boolean;
+  surface: boolean;
 }
 
 export interface ReviewModel {
@@ -48,6 +89,7 @@ export interface ReviewModel {
   warnings: string[];
   renames: RenameRow[];
   tokens: TokenRow[];
+  typography: TypographyRow[];
   raw: RawRow[];
 }
 
@@ -55,6 +97,7 @@ export interface Edits {
   newComponentName?: string | null;
   renames: Array<{ index: number; newName: string; apply: boolean }>;
   tokens: Array<{ key: string; name: string; apply: boolean; aliasDesktop: string | null; aliasMobile: string | null }>;
+  typography?: Array<{ key: string; apply: boolean }>;
 }
 
 const CATEGORIES = ["color", "spacing", "shape"];
@@ -81,11 +124,52 @@ function semanticType(t: TokenProposal["type"]): CatalogVariable["type"] {
   return t === "COLOR" ? "COLOR" : "FLOAT";
 }
 
+const FAMILY_LABELS: Record<RawValueUse["role"], string> = {
+  background: "Fits background",
+  text: "Fits text",
+  icon: "Fits icon",
+  border: "Fits border",
+  other: "",
+};
+
+type OptionSource = Pick<UnmatchedValue, "type" | "uses" | "pairOptions">;
+
+function familyGroups(u: OptionSource, semantic: SemanticOption[], first: string[]): OptionGroup[] {
+  const want = semanticType(u.type);
+  const role = u.uses[0]?.role ?? "other";
+  const byId = new Map(semantic.map((s) => [s.id, s]));
+  const restricted = u.type === "COLOR" && role !== "other";
+  const fits = (s: SemanticOption) => s.type === want && (!restricted || inRoleFamily(s, role));
+  const option = (s: SemanticOption) => ({ id: s.id, label: s.name });
+  const taken = new Set<string>();
+  const groups: OptionGroup[] = [];
+  const add = (label: string, list: SemanticOption[]) => {
+    const fresh = list.filter((s) => !taken.has(s.id));
+    fresh.forEach((s) => taken.add(s.id));
+    if (fresh.length) groups.push({ label, options: fresh.map(option) });
+  };
+  const known = (ids: string[]) => ids.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []));
+  for (const id of first) taken.add(id);
+  add("Pairs with the surface", known(u.pairOptions ?? []).filter(fits));
+  if (restricted) {
+    add(FAMILY_LABELS[role], sortByTokenName(semantic.filter(fits)));
+    return groups;
+  }
+  const byCollection = new Map<string, SemanticOption[]>();
+  for (const s of semantic) if (fits(s)) byCollection.set(s.collection, [...(byCollection.get(s.collection) ?? []), s]);
+  for (const [label, list] of byCollection) add(label, sortByTokenName(list));
+  return groups;
+}
+
 export function aliasOptions(token: TokenProposal, semantic: SemanticOption[]): OptionGroup[] {
   const byId = new Map(semantic.map((s) => [s.id, s]));
+  const role = token.uses[0]?.role ?? "other";
   const suggested: string[] = [];
-  for (const id of [token.alias.desktop, token.alias.mobile, ...token.candidates]) {
-    if (id && !suggested.includes(id)) suggested.push(id);
+  for (const id of [token.alias.desktop, token.alias.mobile]) if (id && !suggested.includes(id)) suggested.push(id);
+  for (const id of token.candidates) {
+    const s = byId.get(id);
+    const fits = !s || token.type !== "COLOR" || role === "other" || inRoleFamily(s, role);
+    if (fits && !suggested.includes(id)) suggested.push(id);
   }
   const groups: OptionGroup[] = [];
   if (suggested.length) {
@@ -94,24 +178,109 @@ export function aliasOptions(token: TokenProposal, semantic: SemanticOption[]): 
       options: suggested.map((id) => ({ id, label: byId.get(id)?.name ?? id })),
     });
   }
-  const want = semanticType(token.type);
-  const byCollection = new Map<string, Array<{ id: string; label: string }>>();
-  for (const s of semantic) {
-    if (s.type !== want || suggested.includes(s.id)) continue;
-    const list = byCollection.get(s.collection) ?? [];
-    list.push({ id: s.id, label: s.name });
-    byCollection.set(s.collection, list);
+  return [...groups, ...familyGroups(token, semantic, suggested)];
+}
+
+export function unmatchedOptions(u: OptionSource, semantic: SemanticOption[]): OptionGroup[] {
+  return familyGroups(u, semantic, []);
+}
+
+function rawValue(u: UnmatchedValue): string {
+  const prefix = `${u.tokenName}|`;
+  return u.key.startsWith(prefix) ? u.key.slice(prefix.length) : u.display;
+}
+
+export function adoptUnmatched(p: Proposal, key: string, variableId: string, variableName: string): Proposal {
+  const u = p.unmatched.find((x) => x.key === key);
+  if (!u) return p;
+  const value = rawValue(u);
+  const adopted: TokenProposal = {
+    key: u.key,
+    name: u.tokenName,
+    status: "new",
+    type: u.type,
+    alias: { desktop: variableId, mobile: variableId },
+    candidates: [],
+    match: "manual",
+    source: "user",
+    replaces: value,
+    uses: u.uses.slice(),
+    note: `Changes the look: ${value} -> ${variableName}`,
+    skip: false,
+  };
+  return {
+    ...p,
+    tokens: [...p.tokens, adopted],
+    unmatched: p.unmatched.filter((x) => x.key !== key),
+  };
+}
+
+// `baseline` is the proposal as the plugin sent it; it holds the unmatched row and its original position.
+export function undoAdopt(p: Proposal, key: string, baseline: Proposal): Proposal {
+  const t = p.tokens.find((x) => x.key === key);
+  if (!t || t.source !== "user" || !baseline.unmatched.some((u) => u.key === key)) return p;
+  const keep = new Set([...p.unmatched.map((u) => u.key), key]);
+  return {
+    ...p,
+    tokens: p.tokens.filter((x) => x.key !== key),
+    unmatched: baseline.unmatched.filter((u) => keep.has(u.key)),
+  };
+}
+
+export function touchesSurface(uses: RawValueUse[]): boolean {
+  return uses.some((u) => u.kind === "color" && u.field === "fills" && u.role === "background");
+}
+
+export function rawRow(u: UnmatchedValue, semantic: SemanticOption[]): RawRow {
+  const options = unmatchedOptions(u, semantic);
+  const s = u.suggestion;
+  const offered = !!s && options.some((g) => g.options.some((o) => o.id === s.variableId));
+  return {
+    key: u.key,
+    display: u.display,
+    useCount: u.uses.length,
+    reason: offered ? `${u.reason} ${s!.reason}` : u.reason,
+    options,
+    selected: offered ? s!.variableId : null,
+    suggested: offered,
+    surface: touchesSurface(u.uses),
+  };
+}
+
+export function suggestedKeys(p: Proposal): string[] {
+  return p.unmatched.filter((u) => u.suggestion).map((u) => u.key);
+}
+
+// Same as clicking "Use token" on every suggested row; each one stays undoable on its own.
+export function adoptAllSuggestions(p: Proposal): Proposal {
+  let next = p;
+  for (const u of p.unmatched) {
+    if (u.suggestion) next = adoptUnmatched(next, u.key, u.suggestion.variableId, u.suggestion.variableName);
   }
-  for (const [label, options] of byCollection) groups.push({ label, options });
-  return groups;
+  return next;
 }
 
 export function buildReviewModel(p: Proposal, semantic: SemanticOption[]): ReviewModel {
   const raw: RawRow[] = [];
   const tokens: TokenRow[] = [];
-  for (const t of p.tokens) {
+  const names = new Map(semantic.map((s) => [s.id, s.name]));
+  const previousText = (prev: TokenProposal["previousAlias"]): string | null => {
+    if (!prev) return null;
+    const n = (id: string | null) => (id ? (names.get(id) ?? id) : "none");
+    return prev.desktop === prev.mobile ? n(prev.desktop) : `${n(prev.desktop)} (desktop) / ${n(prev.mobile)} (mobile)`;
+  };
+  for (const t of creationOrder(p.tokens, p.componentName)) {
     if (t.match === "none") {
-      raw.push({ display: `${t.name} (${t.replaces})`, useCount: t.uses.length, reason: t.note ?? "No semantic token matches this value" });
+      raw.push({
+        key: null,
+        display: `${t.name} (${t.replaces})`,
+        useCount: t.uses.length,
+        reason: t.note ?? "No semantic token matches this value",
+        options: [],
+        selected: null,
+        suggested: false,
+        surface: false,
+      });
       continue;
     }
     tokens.push({
@@ -120,6 +289,7 @@ export function buildReviewModel(p: Proposal, semantic: SemanticOption[]): Revie
       apply: !t.skip,
       status: t.status,
       match: t.match,
+      source: t.source,
       splitModes: t.alias.desktop !== t.alias.mobile,
       aliasDesktop: t.alias.desktop,
       aliasMobile: t.alias.mobile,
@@ -127,9 +297,13 @@ export function buildReviewModel(p: Proposal, semantic: SemanticOption[]): Revie
       replaces: t.replaces,
       useCount: t.uses.length,
       note: t.note,
+      kind: t.kind ?? null,
+      previousAlias: t.kind === "alias-change" ? previousText(t.previousAlias) : null,
+      previousName: t.kind === "rename" ? (t.previousName ?? null) : null,
+      surface: touchesSurface(t.uses),
     });
   }
-  for (const u of p.unmatched) raw.push({ display: u.display, useCount: u.uses.length, reason: u.reason });
+  for (const u of p.unmatched) raw.push(rawRow(u, semantic));
   return {
     componentName: p.componentName,
     newComponentName: p.newComponentName,
@@ -141,9 +315,49 @@ export function buildReviewModel(p: Proposal, semantic: SemanticOption[]): Revie
       newName: r.newName,
       reason: r.reason,
       apply: !r.skip,
+      source: r.source,
+      outsideVocabulary: r.outsideVocabulary,
     })),
     tokens,
+    typography: (p.typography ?? []).map((t) => ({
+      key: t.key,
+      role: t.role,
+      apply: !t.skip,
+      match: t.match,
+      layerCount: t.uses.length,
+      bindings: (Object.entries(t.bindings) as Array<[TypographyField, string]>).map(([field, id]) => ({ field, variable: names.get(id) ?? id })),
+      note: t.note,
+    })),
     raw,
+  };
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+export function formatLocalTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+export interface NamingBanner {
+  tone: "claude" | "warning";
+  text: string;
+}
+
+export function namingBanner(naming: NamingSource | null): NamingBanner | null {
+  if (!naming) return null;
+  if (naming.source === "claude") {
+    return {
+      tone: "claude",
+      text: `Names proposed by Claude, ${formatLocalTime(naming.createdAt)}. Rows marked Rules were filled in for layers Claude did not cover.`,
+    };
+  }
+  if (!naming.claudeRequested) return null;
+  return {
+    tone: "warning",
+    text: "No Claude proposal found on this component. Ask Claude Code to name it, then scan again. Showing rule-based names meanwhile.",
   };
 }
 
@@ -172,8 +386,46 @@ export function collectProposal(original: Proposal, edits: Edits): Proposal {
       return copy;
     }),
     unmatched: original.unmatched.map((u) => ({ ...u, uses: u.uses.slice() })),
+    ...(original.typography
+      ? {
+          typography: original.typography.map((t) => {
+            const e = edits.typography?.find((x) => x.key === t.key);
+            return { ...t, uses: t.uses.slice(), bindings: { ...t.bindings }, skip: e ? !e.apply : t.skip };
+          }),
+        }
+      : {}),
     warnings: original.warnings.slice(),
   };
+}
+
+export function surfaceChoices(current: Proposal): RowChoice[] {
+  return current.tokens
+    .filter((t) => touchesSurface(t.uses) && t.match !== "none")
+    .map((t) => ({ key: t.key, apply: !t.skip, alias: { ...t.alias } }));
+}
+
+export function mergeRepaired(
+  previous: { original: Proposal; edits: Edits },
+  next: Proposal,
+): { original: Proposal; edits: Edits } {
+  let original = next;
+  for (const t of previous.original.tokens) {
+    if (t.source === "user" && next.unmatched.some((u) => u.key === t.key) && t.alias.desktop) {
+      const adopted = adoptUnmatched(original, t.key, t.alias.desktop, "");
+      original = { ...adopted, tokens: adopted.tokens.map((x) => (x.key === t.key ? { ...x, alias: { ...t.alias }, note: t.note } : x)) };
+    }
+  }
+  const before = new Map(previous.original.tokens.map((t) => [t.key, t]));
+  const same = (a: TokenProposal, b: TokenProposal | undefined) =>
+    !!b && a.skip === b.skip && a.alias.desktop === b.alias.desktop && a.alias.mobile === b.alias.mobile && a.kind === b.kind;
+  const tokens = original.tokens.map((t) => {
+    const kept = previous.edits.tokens.find((e) => e.key === t.key);
+    return kept && same(t, before.get(t.key))
+      ? { ...kept }
+      : { key: t.key, name: t.name, apply: !t.skip, aliasDesktop: t.alias.desktop, aliasMobile: t.alias.mobile };
+  });
+  const typography = (original.typography ?? []).map((t) => previous.edits.typography?.find((e) => e.key === t.key) ?? { key: t.key, apply: !t.skip });
+  return { original, edits: { ...previous.edits, tokens, typography } };
 }
 
 export function tokenErrors(p: Proposal): Map<string, string> {
@@ -183,7 +435,7 @@ export function tokenErrors(p: Proposal): Map<string, string> {
   for (const t of active) {
     const err = validateTokenName(t.name);
     if (err) errors.set(t.key, err);
-    if (!t.alias.desktop || !t.alias.mobile) errors.set(t.key, errors.get(t.key) ?? "Pick an alias for every mode");
+    if (t.kind !== "rename" && (!t.alias.desktop || !t.alias.mobile)) errors.set(t.key, errors.get(t.key) ?? "Pick an alias for every mode");
     const list = byName.get(t.name) ?? [];
     list.push(t);
     byName.set(t.name, list);
@@ -214,10 +466,11 @@ export function findProblems(p: Proposal): string[] {
   return problems;
 }
 
-export function countChecked(p: Proposal): { renames: number; tokens: number } {
+export function countChecked(p: Proposal): { renames: number; tokens: number; typography: number } {
   return {
     renames: p.renames.filter((r) => !r.skip).length,
     tokens: p.tokens.filter((t) => !t.skip && t.match !== "none").length,
+    typography: (p.typography ?? []).filter((t) => !t.skip).length,
   };
 }
 
@@ -229,8 +482,23 @@ export function summarizeResult(r: ApplyResult, phase: Phase): string {
   const counts =
     phase === "rename"
       ? `${r.renamed} renamed`
-      : `${r.tokensCreated} tokens created, ${r.tokensReused} reused, ${r.bound} bound`;
+      : `${r.tokensCreated} tokens created, ${r.tokensReused} reused, ${r.bound} bound` +
+        (r.tokenRenames?.length ? `, ${r.tokenRenames.length} renamed` : "") +
+        (r.aliasesChanged ? `, ${r.aliasesChanged} alias${r.aliasesChanged === 1 ? "" : "es"} changed` : "");
   return `${stepTitle(phase)} applied. ${counts}`;
+}
+
+export function renamedTokensText(r: ApplyResult): string | null {
+  if (!r.tokenRenames?.length) return null;
+  return r.tokenRenames.map((x) => `- ${x.from} -> ${x.to}`).join("\n");
+}
+
+export function staleTokensText(r: ApplyResult): string | null {
+  const n = r.staleTokenNames ?? 0;
+  if (n <= 0) return null;
+  return n === 1
+    ? "1 token still uses the old names; step 2 will offer to rename it."
+    : `${n} tokens still use the old names; step 2 will offer to rename them.`;
 }
 
 export type AuditView = { kind: "pass" | "skipped"; text: string } | { kind: "issues"; text: string; lines: string[] };
@@ -239,4 +507,13 @@ export function auditView(audit: ApplyResult["audit"]): AuditView {
   if (audit === "PASS") return { kind: "pass", text: "Audit: PASS" };
   if (audit === "skipped") return { kind: "skipped", text: "Audit: not run in the rename step" };
   return { kind: "issues", text: "Audit issues", lines: audit };
+}
+
+export type LookChangeView = { kind: "unchanged" } | { kind: "intended" | "loud"; lines: string[] };
+
+export function lookChangeView(result: ApplyResult, applied: Proposal | null): LookChangeView {
+  if (!result.snapshotDiff.length) return { kind: "unchanged" };
+  const intended =
+    !!applied && (applied.tokens.some((t) => t.match === "manual" && !t.skip) || (applied.typography ?? []).some((t) => t.match === "manual" && !t.skip));
+  return { kind: intended ? "intended" : "loud", lines: result.snapshotDiff.slice() };
 }

@@ -1,5 +1,5 @@
 import type { LayerNode, LayerRename } from "./types";
-import { vocabularyEntry } from "./vocabulary";
+import { SYNONYMS, synonymOf, VOCABULARY, vocabularyEntry } from "./vocabulary";
 
 interface Ctx {
   parent: LayerNode;
@@ -63,7 +63,8 @@ export function proposeLayerNames(root: LayerNode): LayerRename[] {
       const ctx: Ctx = { parent, siblings, index, isRootChild: parent === root, rootName: root.name, parentName };
       const rename = evaluate(node, ctx);
       if (rename) out.push(rename);
-      if (node.kind !== "INSTANCE" && !isIconGlyph(node)) visit(node, rename ? rename.newName : node.name);
+      const name = rename ? rename.newName : synonymOf(node.name) ?? node.name;
+      if (node.kind !== "INSTANCE" && !isIconGlyph(node)) visit(node, name);
     });
   };
   visit(root, root.name);
@@ -73,24 +74,29 @@ export function proposeLayerNames(root: LayerNode): LayerRename[] {
 function evaluate(node: LayerNode, ctx: Ctx): LayerRename | null {
   const current = node.name;
   if (SLOT_NAME.test(current)) return null;
+  if (isUnnamed(node, ctx.rootName)) {
+    const pick = parentRule(node, ctx) ?? propose(node, ctx);
+    return pick && pick.name !== current ? rename(node, pick) : null;
+  }
+
+  const meaning = synonymOf(current);
+  if (meaning) {
+    if (!fitsVocabulary(node, meaning)) return null;
+    return rename(node, { name: meaning, reason: `synonym of ${meaning}, vocabulary name suggested` }, true);
+  }
+
+  const fixed = current.trim().toLowerCase().replace(/\bstart\b/g, "left").replace(/\bend\b/g, "right");
+  if (!vocabularyEntry(fixed)) return null;
   const byParent = parentRule(node, ctx);
   if (byParent) return byParent.name === current ? null : rename(node, byParent);
-  if (fitsVocabulary(node, current) && !isUnnamed(node, ctx)) return null;
-
-  let pick: Pick | null = null;
-  if (!isUnnamed(node, ctx)) {
-    const fixed = current.trim().toLowerCase().replace(/\bstart\b/g, "left").replace(/\bend\b/g, "right");
-    if (fixed !== current && fitsVocabulary(node, fixed)) {
-      pick = { name: fixed, reason: `name is a vocabulary name with wrong casing or side -> ${fixed}` };
-    }
+  if (fixed !== current && fitsVocabulary(node, fixed)) {
+    return rename(node, { name: fixed, reason: `name is a vocabulary name with wrong casing or side -> ${fixed}` });
   }
-  pick = pick ?? propose(node, ctx);
-  if (!pick || pick.name === current) return null;
-  return rename(node, pick);
+  return null;
 }
 
-function rename(node: LayerNode, pick: Pick): LayerRename {
-  return { indexPath: node.indexPath, oldName: node.name, newName: pick.name, reason: pick.reason, skip: false };
+function rename(node: LayerNode, pick: Pick, skip = false): LayerRename {
+  return { indexPath: node.indexPath, oldName: node.name, newName: pick.name, reason: pick.reason, skip, source: "rules", outsideVocabulary: false };
 }
 
 const CHILD_NAME: Record<string, string> = {
@@ -139,10 +145,36 @@ function fitsVocabulary(node: LayerNode, name: string): boolean {
   return (entry.layer === "text") === (node.kind === "TEXT");
 }
 
-function isUnnamed(node: LayerNode, ctx: Ctx): boolean {
-  const name = node.name.trim();
-  if (name === "" || isDefaultFigmaName(name) || name === ctx.rootName) return true;
-  return node.text !== null && node.text.characters.trim().startsWith(name);
+export function isUnnamed(layer: LayerNode, componentName?: string): boolean {
+  const name = layer.name.trim();
+  if (name === "" || isDefaultFigmaName(name) || name === componentName || looksLikeRandomTyping(name)) return true;
+  return layer.text !== null && layer.text.characters.trim().startsWith(name);
+}
+
+const KNOWN_TOKENS = new Set(
+  ([] as string[]).concat(...[...VOCABULARY.map((e) => e.name), ...SYNONYMS.keys()].map((n) => n.toLowerCase().split(/[\s\-_/]+/))),
+);
+
+export function looksLikeRandomTyping(name: string): boolean {
+  const tokens = name
+    .toLowerCase()
+    .replace(/[0-9]/g, "")
+    .split(/[\s\-_/]+/)
+    .filter((t) => t.length >= 3);
+  return tokens.length > 0 && tokens.every(isMash);
+}
+
+function isMash(token: string): boolean {
+  if (KNOWN_TOKENS.has(token)) return false;
+  if (!/[aeiouy]/.test(token)) return true;
+  if (/(.)\1\1/.test(token)) return true;
+  const seen = new Set<string>();
+  for (let i = 0; i < token.length - 1; i++) {
+    const pair = token.slice(i, i + 2);
+    if (seen.has(pair)) return true;
+    seen.add(pair);
+  }
+  return false;
 }
 
 function propose(node: LayerNode, ctx: Ctx): Pick | null {

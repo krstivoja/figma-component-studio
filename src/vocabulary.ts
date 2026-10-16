@@ -187,3 +187,23 @@ const byName = new Map(VOCABULARY.map((e) => [e.name, e]));
 export function vocabularyEntry(name: string): VocabularyEntry | undefined {
   return byName.get(name);
 }
+
+export const SYNONYMS: ReadonlyMap<string, string> = new Map([
+  ["nav", "navbar"],
+  ["navigation", "navbar"],
+  ["nav-bar", "navbar"],
+  ["navigation-item", "nav-item"],
+  ["nav item", "nav-item"],
+  ["ul", "list"],
+  ["items", "list"],
+  ["li", "list-item"],
+  ["btn", "button"],
+  ["img", "image"],
+  ["picture", "image"],
+  ["heading", "title"],
+  ["desc", "description"],
+]);
+
+export function synonymOf(name: string): string | undefined {
+  return SYNONYMS.get(name.trim().toLowerCase());
+}

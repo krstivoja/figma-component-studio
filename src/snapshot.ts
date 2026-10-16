@@ -1,4 +1,5 @@
-import { toHex } from "./scan";
+import { getLiveVariable } from "./variables";
+import { textStyleOf, toHex } from "./scan";
 
 export type Snapshot = Record<string, Record<string, unknown>>;
 
@@ -51,6 +52,15 @@ export async function takeSnapshot(rootId: string): Promise<Snapshot> {
     }
     s.fills = paints(bag.fills);
     s.strokes = paints(bag.strokes);
+    if (n.type === "TEXT") {
+      const style = textStyleOf(n);
+      s.font = style ? `${style.fontFamily} ${style.fontStyle}` : "mixed";
+      if (style) {
+        const px = (m: { unit: string; value: number }) => round(m.unit === "PERCENT" ? (m.value * style.fontSize) / 100 : m.value);
+        s.lineHeight = style.lineHeight.unit === "AUTO" ? "auto" : px(style.lineHeight);
+        s.letterSpacing = px(style.letterSpacing);
+      }
+    }
     out[n.id + " " + p] = s;
     if ("children" in n && n.type !== "INSTANCE") for (const c of n.children) walk(c, p);
   };
@@ -99,7 +109,7 @@ export async function auditComponent(rootId: string): Promise<"PASS" | string[]>
   const getVar = (id: string) => {
     let p = varCache.get(id);
     if (!p) {
-      p = figma.variables.getVariableByIdAsync(id).catch(() => null);
+      p = getLiveVariable(id);
       varCache.set(id, p);
     }
     return p;
@@ -113,8 +123,12 @@ export async function auditComponent(rootId: string): Promise<"PASS" | string[]>
       return;
     }
     const v = await getVar(id);
-    const col = v ? (colName.get(v.variableCollectionId) ?? "library") : "missing";
-    if (col !== want) issues.push(`${n.name} › ${field}: bound to ${col}/${v?.name}, should be ${want}`);
+    if (!v) {
+      issues.push(`${n.name} › ${field}: bound to a deleted variable (raw value)`);
+      return;
+    }
+    const col = colName.get(v.variableCollectionId) ?? "library";
+    if (col !== want) issues.push(`${n.name} › ${field}: bound to ${col}/${v.name}, should be ${want}`);
   };
 
   const walk = async (n: SceneNode) => {
@@ -140,6 +154,8 @@ export async function auditComponent(rootId: string): Promise<"PASS" | string[]>
       if (n.type === "TEXT") {
         for (const k of TXT) {
           const a = b[k];
+          // Auto line height is not a number; no variable can hold it.
+          if (k === "lineHeight" && !(Array.isArray(a) ? a[0] : a) && (bag.lineHeight as LineHeight | undefined)?.unit === "AUTO") continue;
           await check(n, k, Array.isArray(a) ? a[0] : a, "typography");
         }
       }

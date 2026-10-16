@@ -1,17 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { isDefaultFigmaName, normalizeComponentName, proposeLayerNames } from "../../src/naming";
-import { vocabularyEntry, VOCABULARY } from "../../src/vocabulary";
+import { isDefaultFigmaName, isUnnamed, looksLikeRandomTyping, normalizeComponentName, proposeLayerNames } from "../../src/naming";
+import { SYNONYMS, synonymOf, vocabularyEntry, VOCABULARY } from "../../src/vocabulary";
 import type { LayerNode } from "../../src/types";
 import { applyRenames, frame, hstack, instance, paint, text, tree, vector, vstack } from "./build";
 
 const brief = (root: LayerNode) => proposeLayerNames(root).map((r) => [r.indexPath.join("."), r.oldName, r.newName]);
 
-const workedExample = () =>
+const workedExample = (names = ["aaa", "dasasdd", "adadwwed"]) =>
   tree(
     vstack("card-marko", [
-      vstack("aaa", [text("Headline", "Headline", 16)]),
-      vstack("dasasdd", [text("Headline", "Headline", 16)]),
-      vstack("adadwwed", [text("Headline", "Headline", 16)]),
+      ...names.map((n) => vstack(n, [text("Headline", "Headline", 16)])),
       text("asdadadsasd", "asdadadsasd lorem ipsum", 12),
     ]),
   );
@@ -115,6 +113,15 @@ describe("proposeLayerNames", () => {
     expect(renames[0].reason).toContain("only child is one TEXT, 3 same-shaped siblings -> item");
     expect(renames[0].reason).toContain("list");
     expect(renames[2].reason).not.toContain("list");
+  });
+
+  it("worked example 1 with real typed frame names keeps them as deliberate", () => {
+    expect(brief(workedExample(["pricing", "profile", "settings"]))).toEqual([
+      ["0.0", "Headline", "label"],
+      ["1.0", "Headline", "label"],
+      ["2.0", "Headline", "label"],
+      ["3", "asdadadsasd", "supporting text"],
+    ]);
   });
 
   it("never renames the root", () => {
@@ -322,12 +329,12 @@ describe("proposeLayerNames parent context", () => {
     ]);
   });
 
-  it("names frames inside actions button, but not TEXT", () => {
+  it("names unnamed frames inside actions button, but not TEXT or a deliberate name", () => {
     const renames = proposeLayerNames(actionsCase());
     expect(renames.filter((r) => r.reason.includes("actions")).map((r) => [r.indexPath.join("."), r.newName, r.reason])).toEqual([
       ["0.0", "button", "child of actions -> button"],
-      ["0.1", "button", "child of actions -> button"],
     ]);
+    expect(renames.find((r) => r.indexPath.join(".") === "0.1")).toBeUndefined();
     expect(renames.find((r) => r.indexPath.join(".") === "0.2")?.newName).not.toBe("button");
   });
 
@@ -345,6 +352,132 @@ describe("proposeLayerNames parent context", () => {
       expect(proposeLayerNames(applyRenames(root, proposeLayerNames(root)))).toEqual([]);
     }
   });
+});
+
+const navCase = () =>
+  tree(
+    vstack("card-marko", [
+      vstack("nav", [
+        hstack("table-row", [text("label", "Home")]),
+        hstack("table-row", [text("label", "About")]),
+        hstack("table-row", [text("label", "Contact")]),
+      ]),
+      text("label", "Loose text", 12),
+    ]),
+  );
+
+// Idempotent: applying the checked rows leaves only the same unchecked suggestions.
+function expectStable(root: LayerNode): void {
+  const first = proposeLayerNames(root);
+  const suggestions = first.filter((r) => r.skip);
+  expect(suggestions.every((r) => r.reason.startsWith("synonym of "))).toBe(true);
+  expect(proposeLayerNames(applyRenames(root, first.filter((r) => !r.skip)))).toEqual(suggestions);
+  expect(proposeLayerNames(applyRenames(root, first))).toEqual([]);
+}
+
+describe("proposeLayerNames deliberate names and synonyms", () => {
+  it("real case: nav is suggested as navbar (unchecked), its rows become nav-item, nothing else", () => {
+    const renames = proposeLayerNames(navCase());
+    expect(renames.map((r) => [r.indexPath.join("."), r.oldName, r.newName, r.skip])).toEqual([
+      ["0", "nav", "navbar", true],
+      ["0.0", "table-row", "nav-item", false],
+      ["0.1", "table-row", "nav-item", false],
+      ["0.2", "table-row", "nav-item", false],
+    ]);
+    expect(renames[0].reason).toBe("synonym of navbar, vocabulary name suggested");
+    expect(renames[1].reason).toBe("child of navbar -> nav-item");
+  });
+
+  it("never renames a deliberate name, not even through parent context", () => {
+    const root = tree(
+      vstack("card", [
+        vstack("menu-links", [vstack("x1", [text("label", "A")]), vstack("x2", [text("label", "B")]), vstack("x3", [text("label", "C")])]),
+        vstack("table", [hstack("my-row", [text("label", "A")]), hstack("Frame 2", [text("label", "B")])]),
+      ]),
+    );
+    expect(brief(root)).toEqual([["1.1", "Frame 2", "table-row"]]);
+  });
+
+  it("keeps casing / start-end fixes for vocabulary names and leaves other typed names alone", () => {
+    const root = tree(
+      vstack("card", [vstack("Body Copy", [text("label", "A"), text("value", "B")]), vstack("Footer", [text("label", "C")])]),
+    );
+    expect(brief(root)).toEqual([["1", "Footer", "footer"]]);
+  });
+
+  it("drives children from a synonym parent and suggests each synonym once", () => {
+    const entry = () => vstack("Frame", [text("x", "x"), vector()]);
+    const root = tree(
+      vstack("card", [
+        vstack("UL", [entry(), entry(), entry()]),
+        hstack("Btn", [text("Go", "Go")], { fills: [paint("#0059FF")], layout: { paddingLeft: 8 } }),
+        frame("img", [], { hasImageFill: true }),
+        text("heading", "Welcome", 24),
+        frame("heading", [text("x", "x")]),
+      ]),
+    );
+    const renames = proposeLayerNames(root);
+    expect(renames.map((r) => [r.indexPath.join("."), r.newName, r.skip])).toEqual([
+      ["0", "list", true],
+      ["0.0", "list-item", false],
+      ["0.0.0", "label", false],
+      ["0.0.1", "icon", false],
+      ["0.1", "list-item", false],
+      ["0.1.0", "label", false],
+      ["0.1.1", "icon", false],
+      ["0.2", "list-item", false],
+      ["0.2.0", "label", false],
+      ["0.2.1", "icon", false],
+      ["1", "button", true],
+      ["1.0", "label", false],
+      ["2", "image", true],
+      ["3", "title", true],
+      ["4.0", "label", false],
+    ]);
+    expectStable(root);
+  });
+
+  it("is idempotent: only the same unchecked suggestion rows come back, never checked churn", () => {
+    for (const make of [navCase, ...Object.values(fixtures)]) expectStable(make());
+  });
+});
+
+describe("isUnnamed", () => {
+  it("is true for default names, content-named TEXT and the component name only", () => {
+    expect(isUnnamed(frame("Frame 3"))).toBe(true);
+    expect(isUnnamed(frame(" "))).toBe(true);
+    expect(isUnnamed(text("Hello", "Hello world"))).toBe(true);
+    expect(isUnnamed(frame("card-marko"), "card-marko")).toBe(true);
+    expect(isUnnamed(frame("card-marko"))).toBe(false);
+    expect(isUnnamed(frame("nav"))).toBe(false);
+    expect(isUnnamed(frame("item"))).toBe(false);
+    expect(isUnnamed(text("label", "Home"))).toBe(false);
+  });
+});
+
+const REAL_WORDS = [
+  "card", "address", "pricing", "profile", "settings", "navigation", "headline", "sidebar", "container", "wrapper",
+  "background", "checkbox", "dropdown", "tooltip", "avatar", "thumbnail", "footer", "header", "content", "primary",
+  "secondary", "label", "title", "icon", "card-marko", "Main Nav 2", "btn", "img", "ul", "x1",
+];
+
+describe("looksLikeRandomTyping", () => {
+  it.each(["aaa", "dasasdd", "adadwwed", "adsasasdasd", "asdadadsasd", "qwrt", "sdfg-hjk", "aaa 12"])("%s is mash", (n) =>
+    expect(looksLikeRandomTyping(n)).toBe(true),
+  );
+  it.each(REAL_WORDS)("%s is not mash", (n) => expect(looksLikeRandomTyping(n)).toBe(false));
+  it("keeps a name with any real-word token, and every vocabulary / synonym name", () => {
+    expect(looksLikeRandomTyping("aaa card")).toBe(false);
+    for (const n of [...VOCABULARY.map((e) => e.name), ...SYNONYMS.keys()]) expect(looksLikeRandomTyping(n), n).toBe(false);
+  });
+  it("counts mash names as Unnamed", () => {
+    expect(isUnnamed(frame("dasasdd"))).toBe(true);
+    expect(isUnnamed(frame("pricing"))).toBe(false);
+  });
+  it.each(["banana", "coconut", "remember", "intention", "statistics", "entertainment"])(
+    "known false positive (repeated bigram): %s",
+    (n) => expect(looksLikeRandomTyping(n)).toBe(true),
+  );
 });
 
 describe("isDefaultFigmaName", () => {
@@ -382,5 +515,16 @@ describe("vocabulary", () => {
     const names = VOCABULARY.map((e) => e.name);
     expect(new Set(names).size).toBe(names.length);
     for (const e of VOCABULARY) if (e.group !== "slots") expect(e.name).toBe(e.name.toLowerCase());
+  });
+
+  it("maps synonyms to vocabulary names, and no synonym is itself a vocabulary name", () => {
+    for (const [typed, meaning] of SYNONYMS) {
+      expect(vocabularyEntry(meaning), meaning).toBeDefined();
+      expect(vocabularyEntry(typed), typed).toBeUndefined();
+      expect(typed).toBe(typed.toLowerCase());
+    }
+    expect(synonymOf(" Nav ")).toBe("navbar");
+    expect(synonymOf("Nav Item")).toBe("nav-item");
+    expect(synonymOf("constructor")).toBeUndefined();
   });
 });

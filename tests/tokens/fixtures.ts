@@ -154,6 +154,7 @@ export function buttonVariant(spec: ButtonSpec): VariantScan {
   const root = layer("button", "COMPONENT", [], [layer("label", "TEXT", [0]), layer("icon", "VECTOR", [1])]);
   Object.assign(root.layout, { paddingLeft: px, paddingRight: px, paddingTop: py, paddingBottom: py, itemSpacing: 8 });
   root.corners = { tl: 8, tr: 8, bl: 8, br: 8 };
+  root.fills = [{ hex: BG[`${spec.style}/${spec.state}`], opacity: 1, boundVariableId: null }];
 
   const uses: RawValueUse[] = [
     numUse(id, [], "button", "paddingLeft", px),

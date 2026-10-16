@@ -13,15 +13,55 @@ type ResolvedValue = CatalogVariable["values"][string];
 const GLOBAL = "_global";
 const TRANSPARENT = "color/transparent";
 
+const modeKey = (s: string): string => s.trim().toLowerCase();
+
+export function findMode(keys: string[], mode: string | undefined): string | undefined {
+  if (!mode) return undefined;
+  const want = modeKey(mode);
+  return keys.find((k) => modeKey(k) === want);
+}
+
+// Keys keep the catalog's mode order; the first one is the collection's default mode.
+export function pickMode(keys: string[], mode: string | undefined, fallbacks: string[]): string | undefined {
+  for (const m of [mode, ...fallbacks]) {
+    const hit = findMode(keys, m);
+    if (hit !== undefined) return hit;
+  }
+  return keys[0];
+}
+
 export function resolveValue(
   v: CatalogVariable,
   mode: string | undefined,
   fallbacks: string[],
 ): ResolvedValue | undefined {
-  if (mode && v.values[mode]) return v.values[mode];
-  for (const f of fallbacks) if (v.values[f]) return v.values[f];
-  const keys = Object.keys(v.values).sort();
-  return keys.length ? v.values[keys[0]] : undefined;
+  const key = pickMode(Object.keys(v.values), mode, fallbacks);
+  return key === undefined ? undefined : v.values[key];
+}
+
+const PREFERRED_MODES: Array<{ collection: string; modes: string[]; fallbacks: string[]; noun: string }> = [
+  { collection: "color", modes: ["light"], fallbacks: [], noun: "colors" },
+  { collection: "dimensions", modes: ["desktop", "mobile"], fallbacks: ["desktop"], noun: "values" },
+  { collection: GLOBAL, modes: ["global"], fallbacks: [], noun: "values" },
+];
+
+export function modeWarnings(catalog: Catalog): string[] {
+  const warnings: string[] = [];
+  for (const { collection, modes, fallbacks, noun } of PREFERRED_MODES) {
+    const keys: string[] = [];
+    for (const v of catalog.variables) {
+      if (v.collection !== collection) continue;
+      for (const k of Object.keys(v.values)) if (!keys.includes(k)) keys.push(k);
+    }
+    if (keys.length === 0) continue;
+    const missing = modes.filter((m) => findMode(keys, m) === undefined);
+    if (missing.length === 0) continue;
+    const used = [...new Set(missing.map((m) => pickMode(keys, m, fallbacks)!))];
+    warnings.push(
+      `Collection "${collection}" has no ${missing.map((m) => `"${m}"`).join(" or ")} mode (modes: ${keys.join(", ")}); ${noun} were compared against ${used.map((u) => `"${u}"`).join(", ")}.`,
+    );
+  }
+  return warnings;
 }
 
 function byDistanceThenName(a: Candidate, b: Candidate): number {
@@ -93,12 +133,33 @@ export function colorDistance(hexA: string, opA: number, hexB: string, opB: numb
 }
 
 const FAMILIES: Record<RawValueUse["role"], { prefixes: string[]; preferred: string | null }> = {
-  background: { prefixes: ["color/surface/", "color/background/"], preferred: "color/surface/" },
+  background: { prefixes: ["color/surface/", "color/background/primary"], preferred: "color/surface/" },
   text: { prefixes: ["color/on-surface/", "color/on-background/"], preferred: "color/on-surface/" },
   icon: { prefixes: ["color/on-surface/", "color/on-background/"], preferred: "color/on-surface/" },
   border: { prefixes: ["color/border/"], preferred: "color/border/" },
   other: { prefixes: ["color/"], preferred: null },
 };
+
+const withTransparent = (role: RawValueUse["role"]): boolean => role === "border" || role === "other";
+
+export function inRoleFamily(v: Pick<CatalogVariable, "name" | "collection">, role: RawValueUse["role"]): boolean {
+  if (v.collection === GLOBAL) return v.name === TRANSPARENT && withTransparent(role);
+  return v.collection === "color" && inFamily(v.name, FAMILIES[role].prefixes);
+}
+
+// A prefix ending in "/" is a group; anything else names one variable.
+function inFamily(name: string, prefixes: string[]): boolean {
+  return prefixes.some((p) => (p.endsWith("/") ? name.startsWith(p) : name === p));
+}
+
+// Equal distance: the `preferred` name, then an `enabled` step, then the existing order.
+export function preferEnabled(cands: Candidate[], preferred?: string): Candidate[] {
+  const rank = (c: Candidate) => (c.variable.name === preferred ? 0 : c.variable.name.split("/").pop() === "enabled" ? 1 : 2);
+  return cands
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => Number(b.c.exact) - Number(a.c.exact) || a.c.distance - b.c.distance || rank(a.c) - rank(b.c) || a.i - b.i)
+    .map((x) => x.c);
+}
 
 export function colorFamily(role: RawValueUse["role"]): string[] {
   return FAMILIES[role].prefixes;
@@ -115,8 +176,8 @@ export function matchColor(
   const vars = catalog.variables.filter(
     (v) =>
       v.type === "COLOR" &&
-      ((v.collection === "color" && family.prefixes.some((p) => v.name.startsWith(p))) ||
-        (v.collection === GLOBAL && v.name === TRANSPARENT)),
+      ((v.collection === "color" && inFamily(v.name, family.prefixes)) ||
+        (v.collection === GLOBAL && v.name === TRANSPARENT && withTransparent(role))),
   );
   const fit = (v: CatalogVariable): number => {
     if (v.collection === GLOBAL) return role === "border" ? 0 : 1;

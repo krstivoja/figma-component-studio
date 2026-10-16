@@ -277,6 +277,92 @@ Items wrapped in a frame named `table` stayed `item`; wrong. The parent's name d
 - Root's own name counts as a parent name too (a component named `table` gets `table-row` children).
 - Review with 0 renames shows "Nothing to rename, all layer names follow the convention."
 
+## Claude naming via Figma console MCP (decided 2026-10-15)
+Why: naming needs understanding of what the component is (placement, whole structure, visual). Rules can't, Laya base model scored 1-2/10 on a 10-case check. Tokens stay rule-based (math).
+No API key: Claude Code (user's subscription) reads Figma through the figma-console MCP and hands a proposal to the plugin through the file itself.
+
+### Flow
+1. In Claude Code: "name the selected component" (or a node link).
+2. Claude (skill, see below): `figma_get_status` -> `figma_get_selection` -> resolve root (component set / component / top-level frame, same rule as the plugin) -> `figma_execute` reads the tree summary of the reference variant (names, types, sizes, layout, text, parent chain, 5 levels, no instance internals) -> `figma_take_screenshot` of the root -> reads where the root sits on the page (page name, parent section/frame, neighbours).
+3. Claude picks names: vocabulary first (`src/vocabulary.ts`), Naming Conventions rules, parent-context table. A name outside the vocabulary is allowed only with `outsideVocabulary: true` and a reason.
+4. Claude writes the proposal with `figma_execute`: `root.setSharedPluginData("component_studio", "naming_proposal", json)`. Claude never renames layers itself; the human gate stays in the plugin.
+5. In Figma: Component Studio -> "1. Rename layers" finds the stored proposal and shows it in the review table; Apply works as today (every variant, snapshot diff).
+6. After Apply the stored proposal is deleted, so it is never applied twice.
+
+### Stored proposal (shared plugin data, JSON, version 1)
+```
+{ version: 1, source: "claude", createdAt: ISO, rootId, rootName,
+  structureHash,            // hash of the reference variant tree (indexPath + type + name)
+  componentName: string|null,  // proposed component name, null = keep
+  renames: [{ indexPath, nodeId, oldName, newName, reason, outsideVocabulary }] }
+```
+- Shared plugin data because the bridge plugin and Component Studio are different plugins; normal plugin data is private per plugin.
+
+### Plugin changes
+- `LayerRename` gets `source: "claude" | "rules"` and `outsideVocabulary: boolean`.
+- Rename scan: read + validate the stored proposal (pure `parseStoredProposal(json, scan)`): wrong version/root -> ignored with a warning; `structureHash` differs -> warning "layers changed since Claude looked", rows whose `oldName` no longer matches at `indexPath` are unchecked with the reason.
+- Merge (pure `mergeRenames(claude, rules)`): Claude rows win; rules fill only layers Claude did not cover, marked `rules`.
+- Review UI: banner "Names proposed by Claude, <time>" (or "No Claude proposal, using rules"); source badge per row; badge "not in vocabulary" for `outsideVocabulary` rows.
+- Apply: delete the stored key on success.
+- Tests in `tests/naming/` for parse, stale detection, merge.
+
+### Skill (Claude side)
+- New skill file `component-studio-naming` (SKILL.md): the flow above, the JSON contract, "never rename directly", and to read `src/vocabulary.ts` + the second-brain Naming Conventions sections each run.
+- Builds on `component-cleanup` (naming part only); variant/property fixes stay in that skill.
+
+### Decisions (user, 2026-10-15)
+1. Skill lives in this repo: `.claude/skills/component-studio-naming/SKILL.md`; run Claude Code from this folder.
+2. Rules fill layers Claude did not cover, marked `rules`.
+3. Recording approved renames for a Laya fine-tune: later, separate plan.
+
+### "Help with Claude Code" checkbox (user, 2026-10-15)
+- Next to "1. Rename layers", unchecked by default, remembered per browser (localStorage, try/catch).
+- Off: rules only; a stored Claude proposal is ignored and kept. No banner.
+- On: stored Claude proposal is used (merged with rules for uncovered layers). None stored -> warning banner "Ask Claude Code to name it, then scan again", rule names shown meanwhile.
+- The plugin cannot start Claude Code; the checkbox only decides whether the stored proposal is used.
+- Stored proposal is deleted after apply only when that review actually used it.
+- Idea, not planned: rules could flag layers they only named generically (`container`, `wrapper`, `item` fallback) and hint "try Help with Claude Code" for unsure components.
+
+### structureHash (identical in plugin and skill)
+Reference variant = the root itself for COMPONENT / FRAME; for COMPONENT_SET the first child of type COMPONENT.
+```js
+function structureHash(root) {
+  const lines = [];
+  (function walk(n, path) {
+    lines.push(path.join(".") + "|" + n.type + "|" + (path.length ? n.name : ""));
+    if ("children" in n && n.type !== "INSTANCE") n.children.forEach((c, i) => walk(c, [...path, i]));
+  })(root, []);
+  const s = lines.join("\n");
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
+```
+Uses raw Figma `type` strings (not `LayerKind`) and includes hidden layers, so both sides hash the same tree.
+
+## Deliberate names and synonyms (from Figma test 2026-10-15, screenshot 22.33)
+Bug: user renamed a wrapper to `nav`; rules proposed `nav` -> `list` (shape rule) and children -> `list-item`, because `nav` is not in the vocabulary.
+
+Classes of current names:
+- **Unnamed**: Figma default names, TEXT named after its own content, layer named like the component, keyboard mash (`aaa`, `dasasdd`: every 3+ letter token has no vowel, a triple letter, or a repeated bigram). Rules may rename freely.
+- **Vocabulary**: a name in `src/vocabulary.ts`. Rules may change it only via parent-context (e.g. `item` under `table` -> `table-row`).
+- **Deliberate**: any other name a person typed. Rules never rename it (casing / Title Case / start-end fixes only). Not overridden by parent-context either.
+
+Synonyms (deliberate name -> vocabulary meaning, used for parent-context and as a suggestion):
+| Typed | Means |
+|---|---|
+| `nav`, `navigation`, `nav-bar` | `navbar` |
+| `navigation-item`, `nav item` | `nav-item` |
+| `ul`, `items` | `list` |
+| `li` | `list-item` |
+| `btn` | `button` |
+| `img`, `picture` | `image` |
+| `heading` | `title` |
+| `desc` | `description` |
+- A synonym parent drives its children like the vocabulary name (`nav` children -> `nav-item`).
+- The layer itself gets an UNCHECKED suggestion row (`skip: true`, reason "synonym of navbar, vocabulary name suggested").
+- With a Claude proposal, rules fill only Unnamed layers (resolves the earlier open item).
+
 ## Files (expected)
 - `src/scan.ts` raw value collection
 - `src/naming.ts` part/layer naming
@@ -302,5 +388,9 @@ Items wrapped in a frame named `table` stayed `item`; wrong. The parent's name d
 - [x] UI proposal table, two-step flow, Laya removed (also from manifest)
 - [x] Roots: component, component set, or top-level frame; any inner selected layer climbs to its root
 - [x] typecheck + 185 tests + build pass; UI checked in a browser with mock data (both steps)
-- [ ] Real run in Figma: step 1 on card-marko frame, then step 2 on a file with `color`/`dimensions`/`components` collections
+- [x] Parent-context naming (`table` -> `table-row`, `list` -> `list-item`, ...)
+- [x] Claude naming: skill `.claude/skills/component-studio-naming/SKILL.md`, stored proposal, parse/stale/merge, "Help with Claude Code" checkbox, source badges; skill hash == plugin hash (vector `dea2e91f`); 211 tests; UI checked in browser
+- [x] Deliberate names + synonyms + keyboard-mash detection; rules fill only Unnamed layers when a Claude proposal is used; 266 tests
+- [ ] Known mash false positives (proposed for rename, user can untick): `statistics`, `remember`, `intention`, `entertainment`, `banana`, `coconut`. Revisit if it bites in practice.
+- [ ] Real run in Figma: step 1 on card-marko frame (rules, then with Claude), then step 2 on a file with `color`/`dimensions`/`components` collections
 - [ ] No ESLint configured in this repo (only tsc); decide whether to add one

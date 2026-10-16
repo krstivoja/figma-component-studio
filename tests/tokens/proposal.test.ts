@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildProposal } from "../../src/proposal";
 import { isValidComponentTokenName } from "../../src/tokenNames";
-import type { ComponentScan, Proposal, TokenProposal } from "../../src/types";
+import type { CatalogVariable, ComponentScan, Proposal, TokenProposal } from "../../src/types";
 import { buttonScan, buttonVariant, colorUse, componentVar, layer, makeCatalog, numUse } from "./fixtures";
 
 const byName = (p: Proposal, name: string): TokenProposal => {
@@ -52,7 +52,7 @@ describe("buildProposal: button set end to end", () => {
   it("pairs text with the on-surface of its background", () => {
     const secondary = byName(proposal, "button/color/secondary/text");
     expect(aliasName(secondary.alias.desktop)).toBe("color/on-surface/1/enabled");
-    expect(secondary.candidates.map(aliasName)).toContain("color/on-background/primary");
+    expect(secondary.candidates.map(aliasName)).not.toContain("color/on-background/primary");
     expect(aliasName(byName(proposal, "button/color/primary/icon").alias.desktop)).toBe("color/on-surface/brand/enabled");
   });
 
@@ -129,14 +129,27 @@ function singleScan(uses: Parameters<typeof numUse>[] = []): ComponentScan {
 }
 
 describe("buildProposal: unmatched, skipped and renamed values", () => {
-  it("surfaces a value with no step in unmatched and keeps the row with a null alias", () => {
+  it("surfaces a value with no step once in unmatched and not as a token row", () => {
     const p = buildProposal(singleScan([["v:chip", [], "chip", "itemSpacing", 100]]), makeCatalog(), [], "chip");
-    expect(p.tokens).toHaveLength(1);
-    expect(p.tokens[0].match).toBe("none");
-    expect(p.tokens[0].alias).toEqual({ desktop: null, mobile: null });
+    expect(p.tokens).toEqual([]);
     expect(p.unmatched).toHaveLength(1);
-    expect(p.unmatched[0].display).toBe("100");
-    expect(p.unmatched[0].reason).toMatch(/gap\/\*.*nearest is gap\/m/);
+    expect(p.unmatched[0].display).toBe("chip/spacing/gap (100)");
+    expect(p.unmatched[0].reason).toBe("No gap/* step close to 100.");
+    expect(p.unmatched[0].suggestion).toEqual({ variableId: "d:gap/m", variableName: "gap/m", reason: "Nearest is gap/m (16)." });
+    expect(p.unmatched[0]).toMatchObject({ key: "chip/spacing/gap|100", tokenName: "chip/spacing/gap", type: "FLOAT" });
+  });
+
+  it("gives unmatched values and tokens the same keys on every scan", () => {
+    const uses: Parameters<typeof numUse>[] = [
+      ["v:chip", [], "chip", "itemSpacing", 100],
+      ["v:chip", [], "chip", "paddingLeft", 16],
+    ];
+    const a = buildProposal(singleScan(uses), makeCatalog(), [], "chip");
+    const b = buildProposal(singleScan([...uses].reverse()), makeCatalog(), [], "chip");
+    expect(a.unmatched.map((u) => u.key)).toEqual(["chip/spacing/gap|100"]);
+    expect(b.unmatched.map((u) => u.key)).toEqual(a.unmatched.map((u) => u.key));
+    expect(b.tokens.map((t) => t.key)).toEqual(a.tokens.map((t) => t.key));
+    expect(a.tokens.every((t) => t.source === "match")).toBe(true);
   });
 
   it("reports a nearest step without rounding silently", () => {
@@ -163,7 +176,7 @@ describe("buildProposal: unmatched, skipped and renamed values", () => {
   it("uses the renamed layer name for parts and elements", () => {
     const scan = singleScan([["v:chip", [0], "Frame 12", "itemSpacing", 8]]);
     scan.variants[0].uses.push(colorUse("v:chip", [0], "Frame 12", "fills", "#CCCCCC", "other"));
-    const renames = [{ indexPath: [0], oldName: "Frame 12", newName: "track", reason: "", skip: false }];
+    const renames = [{ indexPath: [0], oldName: "Frame 12", newName: "track", reason: "", skip: false, source: "rules" as const, outsideVocabulary: false }];
     const p = buildProposal(scan, makeCatalog(), renames, "chip");
     expect(p.tokens.map((t) => t.name)).toEqual(["chip/color/track", "chip/track/spacing/gap"]);
     expect(p.newComponentName).toBe("chip");
@@ -206,10 +219,17 @@ describe("buildProposal: unmatched, skipped and renamed values", () => {
   it("splits same-role colors that differ inside one variant by layer name", () => {
     const v = buttonVariant({ style: "primary", state: "enabled", size: "large", layout: "desktop" });
     v.root.children.push(layer("supporting text", "TEXT", [2]));
-    v.uses.push(colorUse(v.id, [2], "supporting text", "fills", "#1A1A1A", "text"));
+    v.uses.push(colorUse(v.id, [2], "supporting text", "fills", "#CCE0FF", "text"));
+    const muted: CatalogVariable = {
+      id: "c:color/on-surface/brand/muted",
+      name: "color/on-surface/brand/muted",
+      collection: "color",
+      type: "COLOR",
+      values: { light: { hex: "#CCE0FF", opacity: 1 } },
+    };
     const p = buildProposal(
       { id: "c:b", name: "button", kind: "COMPONENT", variantProperties: {}, variants: [v] },
-      makeCatalog(),
+      makeCatalog([muted]),
       [],
       "button",
     );
