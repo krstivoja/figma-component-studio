@@ -1,10 +1,13 @@
 import { z } from "zod";
 import type { StudioToolName } from "../src/types";
+import { RULES_TOPICS } from "./rules";
 
 export const NOT_OPEN_ERROR =
   "Component Studio is not open. Open it in Figma (Plugins > Development > Component Studio); it connects by itself.";
-export const PORT_IN_USE_ERROR = (port: number) =>
-  `Another Claude Code session already owns the Component Studio connection (port ${port}). Close it or use that session.`;
+export const RECONNECTING_ERROR =
+  "The Component Studio connection is moving to another Claude session (the one that held it closed). Try again in a few seconds.";
+export const FOREIGN_PORT_ERROR = (port: number) =>
+  `Port ${port} is used by another program, so Component Studio cannot connect. Close that program; this server takes the port over by itself.`;
 
 export const REPLACED_CLOSE_CODE = 4002;
 export const REPLACED_CLOSE_REASON = "replaced by a newer Component Studio window";
@@ -40,6 +43,10 @@ export const proposeTokensShape = {
 
 export const inspectVariablesShape = {
   scope: z.literal("selection").optional(),
+};
+
+export const getRulesShape = {
+  topic: z.enum(RULES_TOPICS),
 };
 
 export interface ToolDef {
@@ -97,3 +104,14 @@ export const TOOLS: ToolDef[] = [
     shape: inspectVariablesShape,
   },
 ];
+
+// Answered by this server itself, never forwarded: not in TOOLS, so the hub refuses it from peers and the plugin never sees it.
+export const RULES_TOOL = {
+  name: "studio_get_rules",
+  description:
+    'The design system rules as markdown, bundled with this server: topic "naming" = the layer name vocabulary, ' +
+    'component and layer naming rules and the parent-context table; topic "tokens" = token creation, property mapping, ' +
+    "surface pairing and semantic color rules. Read only, works without Figma or the plugin. Call it at the start of " +
+    "every naming or token run instead of relying on memory.",
+  shape: getRulesShape,
+} as const;

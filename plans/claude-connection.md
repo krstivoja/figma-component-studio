@@ -50,7 +50,7 @@ Claude cannot be started from the plugin: Claude Code only acts when you type in
 
 ## Decisions (user, 2026-10-15)
 1. Own MCP server.
-2. Port 9240 (coordinator's choice: outside the bridge range 9223-9232). One Claude Code session owns it; a second session gets "port in use" and its tools say so.
+2. Port 9240 (coordinator's choice: outside the bridge range 9223-9232). The first server process binds it as hub; later ones (other Claude Code sessions, Claude Desktop) join it as peers and take over when it exits (see `plans/claude-desktop-extension.md`).
 3. Proposals are also written to shared plugin data.
 
 ## Contract details (in src/types.ts)

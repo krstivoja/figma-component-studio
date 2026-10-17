@@ -1,0 +1,22 @@
+{
+  "manifest_version": "0.3",
+  "name": "component-studio",
+  "display_name": "Component Studio",
+  "description": "Name layers and map raw values to semantic tokens for the selected component in the Component Studio Figma plugin. Proposals only, applied by you in the plugin.",
+  "author": {
+    "name": "Marko Krstic"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"]
+    }
+  },
+  "compatibility": {
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}

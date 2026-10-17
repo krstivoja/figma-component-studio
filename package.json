@@ -6,9 +6,12 @@
     "build": "node esbuild.config.mjs",
     "watch": "node esbuild.config.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "pack:mcpb": "node scripts/pack-mcpb.mjs",
+    "rules": "tsx scripts/gen-rules.ts"
   },
   "devDependencies": {
+    "@anthropic-ai/mcpb": "2.1.2",
     "@figma/plugin-typings": "^1.100.0",
     "@modelcontextprotocol/sdk": "1.32.1",
     "@tailwindcss/cli": "4.3.3",

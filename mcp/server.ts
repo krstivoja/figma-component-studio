@@ -1,100 +1,133 @@
-import type { IncomingMessage } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { WebSocketServer, type WebSocket } from "ws";
+import { version } from "../package.json";
 import { BRIDGE_PORT, type StudioToolName } from "../src/types";
-import { originAllowed, Relay, type RelayResult } from "./relay";
-import { NOT_OPEN_ERROR, PORT_IN_USE_ERROR, REPLACED_CLOSE_CODE, REPLACED_CLOSE_REASON, TOOLS } from "./tools";
+import { Hub, listenHub } from "./hub";
+import { ForeignPortError, Peer } from "./peer";
+import type { RelayResult } from "./relay";
+import { PROMPTS, rulesMarkdown } from "./rules";
+import { FOREIGN_PORT_ERROR, NOT_OPEN_ERROR, RECONNECTING_ERROR, RULES_TOOL, TOOLS } from "./tools";
+
+// Every Claude client starts its own server. The first to bind the port is the hub and owns the plugin socket;
+// the others join it as peers. When the hub exits, the peers race to bind again and the loser rejoins the winner.
+type Role = "hub" | "peer";
+
+const FOREIGN_RETRY_MS = 2000;
 
 const port = Number(process.env.COMPONENT_STUDIO_PORT) || BRIDGE_PORT;
 const log = (message: string) => process.stderr.write(`[component-studio] ${message}\n`);
 
-const relay = new Relay();
-let plugin: WebSocket | null = null;
-let portInUse = false;
+const hub = new Hub();
+const peer = new Peer(log);
+let role: Role | null = null;
+let foreign = false;
+let stopping = false;
+let closeHub: (() => void) | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-const wss = new WebSocketServer({
-  host: "127.0.0.1",
-  port,
-  // Any browser tab could reach localhost; only Figma plugin iframes (Origin "null") or non-browser clients may feed Claude.
-  verifyClient: (info: { req: IncomingMessage }, done: (ok: boolean, code?: number, message?: string) => void) => {
-    if (originAllowed(info.req.headers.origin)) done(true);
-    else done(false, 403, "Forbidden");
-  },
-});
+// A short random delay, so peers that lost the same hub do not all bind at the same instant.
+const takeoverDelay = () => 50 + Math.floor(Math.random() * 200);
 
-wss.on("listening", () => log(`listening on ws://127.0.0.1:${port}`));
+function retry(ms: number): void {
+  if (stopping) return;
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    void takeover();
+  }, ms);
+}
 
-wss.on("error", (error: NodeJS.ErrnoException) => {
-  if (error.code === "EADDRINUSE") {
-    portInUse = true;
-    log(`port ${port} is in use; tools will report it`);
-  } else {
-    log(`WebSocket server error: ${error.message}`);
+async function takeover(): Promise<void> {
+  try {
+    closeHub = await listenHub(port, hub, log);
+    role = "hub";
+    foreign = false;
+    log(`listening on ws://127.0.0.1:${port}`);
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") {
+      log(`WebSocket server error: ${(error as Error).message}`);
+      retry(FOREIGN_RETRY_MS);
+      return;
+    }
   }
-});
-
-wss.on("connection", (socket) => {
-  if (plugin) {
-    relay.rejectAll();
-    plugin.close(REPLACED_CLOSE_CODE, REPLACED_CLOSE_REASON);
+  try {
+    await peer.connect(port, () => {
+      role = null;
+      log("hub closed; taking over the port");
+      retry(takeoverDelay());
+    });
+    role = "peer";
+    foreign = false;
+    log(`port ${port} is held by another Component Studio server; joined it as a peer`);
+  } catch (error) {
+    if (error instanceof ForeignPortError) {
+      if (!foreign) log(`port ${port} is used by another program (${error.message}); retrying`);
+      foreign = true;
+      retry(FOREIGN_RETRY_MS);
+    } else {
+      retry(takeoverDelay());
+    }
   }
-  plugin = socket;
-  log("Component Studio connected");
-  socket.on("message", (data) => {
-    if (!relay.handleMessage(data.toString())) log("ignored malformed or unknown frame");
-  });
-  socket.on("close", () => {
-    if (plugin !== socket) return;
-    plugin = null;
-    relay.rejectAll();
-    log("Component Studio disconnected");
-  });
-  socket.on("error", (error) => log(`socket error: ${error.message}`));
-});
+}
 
 function errorResult(message: string): CallToolResult {
   return { content: [{ type: "text", text: message }], isError: true };
 }
 
-function toResult(tool: StudioToolName, { result, image }: RelayResult): CallToolResult {
-  const payload = tool === "studio_status" ? { ...(result as object), connected: true } : result;
-  const content: CallToolResult["content"] = [{ type: "text", text: JSON.stringify(payload, null, 2) }];
-  if (image) content.push({ type: "image", data: image.base64, mimeType: image.mimeType });
-  return { content };
+function jsonResult(payload: unknown): CallToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+}
+
+function toResult(tool: StudioToolName, current: Role, { result, image }: RelayResult): CallToolResult {
+  const out = jsonResult(tool === "studio_status" ? { ...(result as object), connected: true, role: current } : result);
+  if (image) out.content.push({ type: "image", data: image.base64, mimeType: image.mimeType });
+  return out;
 }
 
 async function callPlugin(tool: StudioToolName, args: unknown): Promise<CallToolResult> {
-  if (portInUse) return errorResult(PORT_IN_USE_ERROR(port));
-  const socket = plugin;
-  if (!socket) {
-    if (tool === "studio_status") return { content: [{ type: "text", text: JSON.stringify({ connected: false }) }] };
-    return errorResult(NOT_OPEN_ERROR);
-  }
+  if (foreign) return errorResult(FOREIGN_PORT_ERROR(port));
+  const current = role;
+  if (!current) return errorResult(RECONNECTING_ERROR);
   try {
-    return toResult(tool, await relay.request((frame) => socket.send(frame), tool, args));
+    return toResult(tool, current, await (current === "hub" ? hub.call(tool, args) : peer.call(tool, args)));
   } catch (error) {
-    return errorResult(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    // The hub answers a peer with NOT_OPEN_ERROR when no plugin is connected, so both roles land here.
+    if (tool === "studio_status" && message === NOT_OPEN_ERROR) return jsonResult({ connected: false, role: current });
+    return errorResult(message);
   }
 }
 
-const mcp = new McpServer({ name: "component-studio", version: "0.1.0" });
+const mcp = new McpServer({ name: "component-studio", version });
 for (const tool of TOOLS) {
   mcp.registerTool(tool.name, { description: tool.description, inputSchema: tool.shape }, (args: unknown) =>
     callPlugin(tool.name, args ?? {}),
   );
 }
+// Rules and prompts are answered here, in every role and with the plugin closed.
+mcp.registerTool(RULES_TOOL.name, { description: RULES_TOOL.description, inputSchema: RULES_TOOL.shape }, ({ topic }) => ({
+  content: [{ type: "text", text: rulesMarkdown(topic) }],
+}));
+for (const prompt of PROMPTS) {
+  mcp.registerPrompt(prompt.name, { description: prompt.description }, () => ({
+    messages: [{ role: "user", content: { type: "text", text: prompt.text } }],
+  }));
+}
 
 function shutdown(): void {
-  for (const client of wss.clients) client.terminate();
-  wss.close();
+  stopping = true;
+  if (retryTimer) clearTimeout(retryTimer);
+  closeHub?.();
+  peer.close();
   process.exit(0);
 }
 
 process.stdin.on("close", shutdown);
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+void takeover();
 
 mcp.connect(new StdioServerTransport()).catch((error: Error) => {
   log(`MCP transport failed: ${error.message}`);

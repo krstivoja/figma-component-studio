@@ -15,7 +15,8 @@
       "./node_modules/@figma",
       "./node_modules/@types"
     ],
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "resolveJsonModule": true
   },
   "include": [
     "src",

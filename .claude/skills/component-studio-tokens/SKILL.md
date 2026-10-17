@@ -6,7 +6,7 @@ description: Suggest semantic color and dimension tokens for raw values in a Fig
 # Component Studio tokens
 
 Pick the right semantic token for raw values that have no exact match, by role and surface, not by closest color.
-Claude talks to the open Component Studio plugin through the `component-studio` MCP tools (`mcp__component-studio__studio_*`).
+Claude talks to the open Component Studio plugin through the `component-studio` MCP tools (`studio_*`).
 The suggestions are stored on the component, the plugin shows them with a Claude badge, and the user reviews and applies them there.
 There is no apply tool, only the user's Apply click writes.
 

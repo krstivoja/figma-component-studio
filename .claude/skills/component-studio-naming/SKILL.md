@@ -6,7 +6,7 @@ description: Propose layer names (and a component name if needed) for a Figma co
 # Component Studio naming
 
 Understand what a Figma component is and does, then propose layer names from the design system vocabulary.
-Claude talks to the open Component Studio plugin through the `component-studio` MCP tools (`mcp__component-studio__studio_*`).
+Claude talks to the open Component Studio plugin through the `component-studio` MCP tools (`studio_*`).
 The proposal is stored on the component, the plugin shows it, and the user reviews and applies it there.
 This skill never renames anything, there is no apply tool.
 
@@ -39,7 +39,7 @@ Then name every layer that needs it.
   - `unnamed` (Figma default, text named after its content, keyboard mash): must be covered, give every one a name.
   - `vocabulary`: change it only through the parent-context table.
   - `deliberate` (a person typed it): never rename it. At most mention a synonym in the report (for example `nav` could be `navbar`).
-- Vocabulary names first (`src/vocabulary.ts`). Respect each entry's `layer` field: `text` names only fit TEXT layers, `frame` names only non-text layers.
+- Vocabulary names first (the vocabulary from step 0). Respect each entry's `layer` field: `text` names only fit TEXT layers, `frame` names only non-text layers.
 - Apply the parent-context table. The parent's new name decides the child's name, cascading top-down. The root's own name counts as a parent name.
 - Casing: lowercase, hyphens for structural layers, spaces for layers a property controls (`supporting text`). Never Title Case. Use `left` / `right`, not `start` / `end`.
 - A text layer is never named after its content. Text content that looks like a name counts as unnamed.

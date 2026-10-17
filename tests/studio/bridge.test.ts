@@ -16,6 +16,7 @@ describe("isBridgeRequest", () => {
     expect(isBridgeRequest({ id: "", tool: "studio_status", args: {} })).toBe(false);
     expect(isBridgeRequest({ id: 1, tool: "studio_status", args: {} })).toBe(false);
     expect(isBridgeRequest({ id: "1", tool: "figma_execute", args: {} })).toBe(false);
+    expect(isBridgeRequest({ id: "1", tool: "studio_get_rules", args: { topic: "naming" } })).toBe(false);
     expect(isBridgeRequest({ id: "1", tool: "studio_status" })).toBe(false);
   });
 });
